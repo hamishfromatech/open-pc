@@ -1,0 +1,26 @@
+#!/bin/bash
+# Open-PC VNC X Session Startup
+# This script runs when VNC starts the desktop session
+
+# Set display
+export DISPLAY=:1
+
+# Start XFCE desktop session
+if [ -x /usr/bin/xfce4-session ]; then
+    exec /usr/bin/xfce4-session
+elif [ -x /usr/bin/startxfce4 ]; then
+    exec /usr/bin/startxfce4
+else
+    # Fallback to basic X setup
+    if [ -x /usr/bin/xfwm4 ]; then
+        xfwm4 &
+    fi
+    if [ -x /usr/bin/xfdesktop ]; then
+        xfdesktop &
+    fi
+    if [ -x /usr/bin/xfce4-panel ]; then
+        xfce4-panel &
+    fi
+    # Wait for window manager
+    sleep 1
+fi

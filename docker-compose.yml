@@ -1,0 +1,97 @@
+version: '3.8'
+
+# Open-PC: AI-Controlled Linux Desktop
+# A standalone sandbox for AI desktop automation
+
+services:
+  # Linux Desktop with VNC and Agent Server
+  open-pc-desktop:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile
+    container_name: open-pc-desktop
+    hostname: open-pc
+    environment:
+      - VNC_PASSWORD=${VNC_PASSWORD:-openpc}
+      - VNC_RESOLUTION=${VNC_RESOLUTION:-1920x1080}
+      - VNC_COL_DEPTH=24
+      - AGENT_HOST=0.0.0.0
+      - AGENT_PORT=8080
+      - AUTH_REQUIRED=${AUTH_REQUIRED:-true}
+    ports:
+      - "5901:5901"    # VNC port (for VNC clients)
+      - "6080:6080"    # noVNC web interface
+      - "8090:8080"    # Agent REST API + WebSocket
+    volumes:
+      - openpc-home:/home/desktop
+      - openpc-logs:/var/log/openpc
+    networks:
+      - openpc-network
+    restart: unless-stopped
+    shm_size: '2gb'
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '1'
+          memory: 2G
+    healthcheck:
+      test: ["CMD", "python3", "/opt/openpc/health_check.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # MCP Server for AI Integration
+  open-pc-mcp:
+    build:
+      context: ./mcp-server
+      dockerfile: Dockerfile
+    container_name: open-pc-mcp
+    environment:
+      - OPENPC_HOST=open-pc-desktop
+      - OPENPC_PORT=8080
+      - OPENPC_PASSWORD=${VNC_PASSWORD:-openpc}
+    ports:
+      - "8091:8000"    # MCP HTTP endpoint
+    depends_on:
+      open-pc-desktop:
+        condition: service_healthy
+    networks:
+      - openpc-network
+    restart: unless-stopped
+
+  # Web Dashboard for Real-time Viewing and Control
+  open-pc-dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: open-pc-dashboard
+    environment:
+      - AGENT_URL=http://open-pc-desktop:8080
+      - VNC_URL=http://localhost:6080
+      - DASHBOARD_PORT=3000
+    ports:
+      - "8092:3000"    # Dashboard web interface
+    depends_on:
+      open-pc-desktop:
+        condition: service_healthy
+    networks:
+      - openpc-network
+    restart: unless-stopped
+
+networks:
+  openpc-network:
+    driver: bridge
+
+volumes:
+  openpc-home:
+    driver: local
+  openpc-logs:
+    driver: local
