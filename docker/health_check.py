@@ -20,7 +20,7 @@ def check_display():
             timeout=5
         )
         return result.returncode == 0
-    except:
+    except Exception:
         return False
 
 def check_agent():
@@ -38,7 +38,7 @@ def check_agent():
         with urllib.request.urlopen(req, timeout=5) as response:
             if response.status == 200:
                 return True
-    except:
+    except Exception:
         pass
     return False
 

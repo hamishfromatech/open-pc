@@ -141,6 +141,7 @@ RUN mkdir -p /home/desktop/.vnc \
 # Copy application files
 COPY agent_server.py /opt/openpc/agent_server.py
 COPY desktop_manager.py /opt/openpc/desktop_manager.py
+COPY sanitization.py /opt/openpc/sanitization.py
 COPY startup.sh /opt/openpc/startup.sh
 COPY xstartup /opt/openpc/xstartup
 COPY health_check.py /opt/openpc/health_check.py

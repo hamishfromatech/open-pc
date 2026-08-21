@@ -12,18 +12,32 @@ import logging
 import os
 import time
 import uuid
-from typing import Dict, Any, Optional, Set
+from typing import Dict, Any, Optional, Set, List
 from dataclasses import dataclass, asdict
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.responses import Response, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import websockets
 
 from desktop_manager import DesktopManager, MouseButton
+
+# ============== Rate Limiting ==============
+limiter = Limiter(key_func=get_remote_address)
+
+
+def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+    """Handle rate limit exceeded errors"""
+    return JSONResponse(
+        status_code=429,
+        content={"error": "Rate limit exceeded. Please retry after a short delay."}
+    )
 
 # Configure logging
 logging.basicConfig(
@@ -36,54 +50,70 @@ logger = logging.getLogger(__name__)
 AGENT_HOST = os.environ.get('AGENT_HOST', '0.0.0.0')
 AGENT_PORT = int(os.environ.get('AGENT_PORT', 8080))
 VNC_PASSWORD = os.environ.get('VNC_PASSWORD', 'openpc')
+REST_AUTH_TOKEN = os.environ.get('REST_AUTH_TOKEN', '')
 AUTH_REQUIRED = os.environ.get('AUTH_REQUIRED', 'true').lower() == 'true'
 
 # Global desktop manager
 desktop_manager: Optional[DesktopManager] = None
 
+# REST API token authentication
+import secrets
+
+def require_token(request: Request):
+    """Require API token if REST_AUTH_TOKEN is set."""
+    if not REST_AUTH_TOKEN:
+        return
+    token = request.headers.get('X-OpenPC-Token')
+    if not token:
+        auth = request.headers.get('Authorization', '')
+        if auth.startswith('Bearer '):
+            token = auth[len('Bearer '):].strip()
+    if not token or not secrets.compare_digest(token, REST_AUTH_TOKEN):
+        raise HTTPException(status_code=401, detail='Invalid or missing API token (X-OpenPC-Token)')
+
 
 # ============== Pydantic Models ==============
 
 class MouseMoveRequest(BaseModel):
-    x: int
-    y: int
-    duration: float = 0.0
+    x: int = Field(ge=0, description="X coordinate (>= 0)")
+    y: int = Field(ge=0, description="Y coordinate (>= 0)")
+    duration: float = Field(ge=0.0, default=0.0, description="Animation duration in seconds")
 
 
 class MouseClickRequest(BaseModel):
-    x: Optional[int] = None
-    y: Optional[int] = None
-    button: str = "left"
-    clicks: int = 1
-    duration: float = 0.0
+    x: Optional[int] = Field(None, ge=0, description="X coordinate (>= 0)")
+    y: Optional[int] = Field(None, ge=0, description="Y coordinate (>= 0)")
+    button: str = Field("left", pattern=r"^(left|right|middle)$")
+    clicks: int = Field(ge=1, le=3, default=1, description="Number of clicks (1-3)")
+    duration: float = Field(ge=0.0, default=0.0, description="Animation duration in seconds")
 
 
 class MouseScrollRequest(BaseModel):
-    clicks: int
-    direction: str = "down"
-    x: Optional[int] = None
-    y: Optional[int] = None
+    clicks: int = Field(ge=1, default=3, description="Number of scroll lines")
+    direction: str = Field("down", pattern=r"^(up|down)$")
+    x: Optional[int] = Field(None, ge=0, description="X coordinate (>= 0)")
+    y: Optional[int] = Field(None, ge=0, description="Y coordinate (>= 0)")
 
 
 class MouseDragRequest(BaseModel):
-    start_x: int
-    start_y: int
-    end_x: int
-    end_y: int
-    duration: float = 0.5
+    start_x: int = Field(ge=0, description="Start X coordinate (>= 0)")
+    start_y: int = Field(ge=0, description="Start Y coordinate (>= 0)")
+    end_x: int = Field(ge=0, description="End X coordinate (>= 0)")
+    end_y: int = Field(ge=0, description="End Y coordinate (>= 0)")
+    duration: float = Field(ge=0.0, default=0.5, description="Drag duration in seconds")
 
 
 class KeyboardTypeRequest(BaseModel):
-    text: str
-    interval: float = 0.05
+    text: str = Field(min_length=1, max_length=10000, description="Text to type (max 10KB)")
+    interval: float = Field(ge=0.0, default=0.05, description="Keystroke delay in seconds")
 
 
 class KeyboardKeyRequest(BaseModel):
-    key: str
+    key: str = Field(min_length=1, max_length=50, description="Key to press")
 
 
 class KeyboardHotkeyRequest(BaseModel):
-    keys: list[str]
+    keys: List[str] = Field(min_length=1, max_length=10, description="Keys for hotkey combination (max 10)")
 
 
 class CommandRequest(BaseModel):
@@ -96,8 +126,8 @@ class WindowRequest(BaseModel):
 
 
 class RunCommandRequest(BaseModel):
-    command: str
-    timeout: int = 30
+    command: str = Field(min_length=1, max_length=5000, description="Shell command (max 5KB)")
+    timeout: int = Field(ge=1, le=300, default=30, description="Timeout in seconds (1-300)")
 
 
 class LaunchRequest(BaseModel):
@@ -105,15 +135,34 @@ class LaunchRequest(BaseModel):
 
 
 class URLRequest(BaseModel):
-    url: str
-    browser: str = "google-chrome"
+    url: str = Field(min_length=1, description="URL to open")
+    browser: str = Field("google-chrome", min_length=1)
+
+
+class LocateOnScreenRequest(BaseModel):
+    image_path: str = Field(min_length=1, description="Path to reference image file")
+    confidence: float = Field(ge=0.0, le=1.0, default=0.9)
+
+
+class LocateOnScreenBase64Request(BaseModel):
+    image_b64: str = Field(min_length=1, description="Base64-encoded PNG image")
+    confidence: float = Field(ge=0.0, le=1.0, default=0.9)
+
+
+class BatchStep(BaseModel):
+    type: str  # 'click', 'move_mouse', 'type', 'press', 'hotkey', 'wait', etc.
+    parameters: Dict[str, Any] = Field(default_factory=dict)
+
+
+class BatchRequest(BaseModel):
+    steps: List[BatchStep] = Field(min_length=1, max_length=50)
 
 
 class OCRRequest(BaseModel):
-    x: Optional[int] = None
-    y: Optional[int] = None
-    width: Optional[int] = None
-    height: Optional[int] = None
+    x: Optional[int] = Field(None, ge=0)
+    y: Optional[int] = Field(None, ge=0)
+    width: Optional[int] = Field(None, gt=0)
+    height: Optional[int] = Field(None, gt=0)
 
 
 # ============== WebSocket Connection Manager ==============
@@ -185,14 +234,41 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS middleware for cross-origin requests
+# REST token authentication middleware (skip /health and /)
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class TokenAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        if REST_AUTH_TOKEN:
+            path = request.url.path
+            if not (path == '/health' or path == '/'):
+                token = request.headers.get('X-OpenPC-Token')
+                if not token:
+                    auth = request.headers.get('Authorization', '')
+                    if auth.startswith('Bearer '):
+                        token = auth[len('Bearer '):].strip()
+                if not token or not secrets.compare_digest(token, REST_AUTH_TOKEN):
+                    from fastapi.responses import JSONResponse
+                    return JSONResponse(status_code=401, content={'detail': 'Invalid or missing API token (X-OpenPC-Token)'})
+        return await call_next(request)
+
+app.add_middleware(TokenAuthMiddleware)
+
+# CORS middleware — restrict to known dashboard origins in production
+DASHBOARD_ORIGINS = os.environ.get(
+    'DASHBOARD_ORIGIN', 'http://localhost:8092,http://localhost:3000'
+).split(',')
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=DASHBOARD_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Register rate limit error handler
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
 
 
 # ============== REST API Endpoints ==============
@@ -233,10 +309,15 @@ async def health():
         )
 
 
+# Helper to run blocking methods without freezing the event loop
+_blocking = asyncio.to_thread  # type: ignore[assignment]
+
+
 # ============== Screenshot Endpoints ==============
 
+@limiter.limit("60/minute")
 @app.get("/screenshot")
-async def get_screenshot():
+def get_screenshot():
     """Get screenshot as PNG image"""
     try:
         img_bytes = desktop_manager.take_screenshot()
@@ -245,8 +326,9 @@ async def get_screenshot():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@limiter.limit("60/minute")
 @app.get("/screenshot/base64")
-async def get_screenshot_base64():
+def get_screenshot_base64():
     """Get screenshot as base64 encoded JSON"""
     try:
         b64 = desktop_manager.take_screenshot_base64()
@@ -255,14 +337,57 @@ async def get_screenshot_base64():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@limiter.limit("60/minute")
 @app.get("/screenshot/region")
-async def get_screenshot_region(x: int, y: int, width: int, height: int):
+def get_screenshot_region(x: int, y: int, width: int, height: int):
     """Get screenshot of a specific region"""
     try:
         img_bytes = desktop_manager.take_screenshot_region(x, y, width, height)
         return Response(content=img_bytes, media_type="image/png")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# Image matching API endpoints (template recognition)
+@limiter.limit("30/minute")
+@app.post("/mouse/locate")
+async def locate_on_screen(request: LocateOnScreenRequest):
+    """Locate a reference image on screen by file path."""
+    try:
+        result = await _blocking(desktop_manager.locate_on_screen, request.image_path, request.confidence)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@limiter.limit("30/minute")
+@app.post("/mouse/locate-base64")
+async def locate_on_screen_base64(request: LocateOnScreenBase64Request):
+    """Locate a reference image on screen from base64-encoded PNG."""
+    try:
+        result = await _blocking(desktop_manager.locate_on_screen_base64, request.image_b64, request.confidence)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============== Batch / Compound Operations ==============
+@limiter.limit("30/minute")
+@app.post("/batch")
+async def batch_operations(request: BatchRequest):
+    """Execute a sequence of operations atomically (click, type, wait, etc)."""
+    steps = request.steps
+    results: List[Dict[str, Any]] = []
+    for step in steps:
+        stype = step.type
+        params = step.parameters
+        res = await execute_command(stype, params)
+        results.append({"type": stype, "result": res})
+        # Stop on failure
+        if isinstance(res, dict) and not res.get("success", True):
+            results.append({"type": "_abort", "result": {"success": False, "error": f"Step '{stype}' failed, aborting batch"}})
+            break
+    return {"success": True, "results": results}
 
 
 # ============== MJPEG Streaming Endpoint ==============
@@ -486,7 +611,8 @@ async def run_command(request: RunCommandRequest):
 # ============== OCR Endpoint ==============
 
 @app.post("/ocr")
-async def ocr_screenshot(request: OCRRequest = None):
+@limiter.limit("5/minute")
+async def ocr_screenshot(request: Optional[OCRRequest] = None):
     """Perform OCR on screenshot"""
     region = None
     if request and all([request.x is not None, request.y is not None,
