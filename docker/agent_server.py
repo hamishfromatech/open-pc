@@ -315,9 +315,9 @@ _blocking = asyncio.to_thread  # type: ignore[assignment]
 
 # ============== Screenshot Endpoints ==============
 
-@limiter.limit("60/minute")
 @app.get("/screenshot")
-def get_screenshot():
+@limiter.limit("60/minute")
+def get_screenshot(request: Request):
     """Get screenshot as PNG image"""
     try:
         img_bytes = desktop_manager.take_screenshot()
@@ -326,9 +326,9 @@ def get_screenshot():
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-@limiter.limit("60/minute")
 @app.get("/screenshot/base64")
-def get_screenshot_base64():
+@limiter.limit("60/minute")
+def get_screenshot_base64(request: Request):
     """Get screenshot as base64 encoded JSON"""
     try:
         b64 = desktop_manager.take_screenshot_base64()
@@ -337,9 +337,9 @@ def get_screenshot_base64():
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-@limiter.limit("60/minute")
 @app.get("/screenshot/region")
-def get_screenshot_region(x: int, y: int, width: int, height: int):
+@limiter.limit("60/minute")
+def get_screenshot_region(request: Request, x: int, y: int, width: int, height: int):
     """Get screenshot of a specific region"""
     try:
         img_bytes = desktop_manager.take_screenshot_region(x, y, width, height)
@@ -349,34 +349,34 @@ def get_screenshot_region(x: int, y: int, width: int, height: int):
 
 
 # Image matching API endpoints (template recognition)
-@limiter.limit("30/minute")
 @app.post("/mouse/locate")
-async def locate_on_screen(request: LocateOnScreenRequest):
+@limiter.limit("30/minute")
+async def locate_on_screen(request: Request, body: LocateOnScreenRequest):
     """Locate a reference image on screen by file path."""
     try:
-        result = await _blocking(desktop_manager.locate_on_screen, request.image_path, request.confidence)
+        result = await _blocking(desktop_manager.locate_on_screen, body.image_path, body.confidence)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-@limiter.limit("30/minute")
 @app.post("/mouse/locate-base64")
-async def locate_on_screen_base64(request: LocateOnScreenBase64Request):
+@limiter.limit("30/minute")
+async def locate_on_screen_base64(request: Request, body: LocateOnScreenBase64Request):
     """Locate a reference image on screen from base64-encoded PNG."""
     try:
-        result = await _blocking(desktop_manager.locate_on_screen_base64, request.image_b64, request.confidence)
+        result = await _blocking(desktop_manager.locate_on_screen_base64, body.image_b64, body.confidence)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 # ============== Batch / Compound Operations ==============
-@limiter.limit("30/minute")
 @app.post("/batch")
-async def batch_operations(request: BatchRequest):
+@limiter.limit("30/minute")
+async def batch_operations(request: Request, body: BatchRequest):
     """Execute a sequence of operations atomically (click, type, wait, etc)."""
-    steps = request.steps
+    steps = body.steps
     results: list[dict[str, Any]] = []
     for step in steps:
         stype = step.type
@@ -612,12 +612,12 @@ def run_command(request: RunCommandRequest):
 
 @app.post("/ocr")
 @limiter.limit("5/minute")
-def ocr_screenshot(request: OCRRequest | None = None):
+def ocr_screenshot(request: Request, body: OCRRequest | None = None):
     """Perform OCR on screenshot"""
     region = None
-    if request and all([request.x is not None, request.y is not None,
-                         request.width is not None, request.height is not None]):
-        region = (request.x, request.y, request.width, request.height)
+    if body and all([body.x is not None, body.y is not None,
+                     body.width is not None, body.height is not None]):
+        region = (body.x, body.y, body.width, body.height)
 
     result = desktop_manager.ocr_screenshot(region)
     return result
@@ -627,7 +627,8 @@ def ocr_screenshot(request: OCRRequest | None = None):
 
 @app.post("/wait")
 async def wait_seconds(seconds: float):
-    """Wait for specified seconds"""
+    """Wait for specified seconds (clamped to 0-300s to prevent abuse)."""
+    seconds = max(0.0, min(float(seconds), 300.0))
     await asyncio.sleep(seconds)
     return {"success": True, "action": "wait", "seconds": seconds}
 
