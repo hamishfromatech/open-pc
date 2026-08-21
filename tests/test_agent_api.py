@@ -21,7 +21,9 @@ def client():
 def test_root(client):
     r = client.get("/")
     assert r.status_code == 200
-    assert r.json()["name"] == "Open-PC Agent Server"
+    body = r.json()
+    assert body["name"] == "Open-PC Agent Server"
+    assert body["version"] == agent_server.APP_VERSION
 
 
 def test_health(client):
