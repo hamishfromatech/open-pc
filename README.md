@@ -258,6 +258,41 @@ curl -X POST http://localhost:8090/apps/open-url \
 
 ---
 
+## 🧪 Development & Testing
+
+Open-PC ships with a test suite, linting, and CI so changes stay safe.
+
+### Python (agent server + MCP server)
+```bash
+# Lint
+pip install ruff
+ruff check docker mcp-server tests
+
+# Run the test suite (no display required — pyautogui is mocked)
+pip install pytest httpx fastapi uvicorn pydantic slowapi pillow
+pytest -q
+```
+
+The API tests use FastAPI's `TestClient` against the real `agent_server` with a
+mocked display layer, exercising routing, the rate limiter, run_command
+sanitization, and the REST token auth middleware end-to-end.
+
+### Dashboard (React + Vite + TypeScript)
+```bash
+cd dashboard
+npm install
+npm run lint        # ESLint (flat config)
+npm run typecheck    # tsc --noEmit
+npm run build        # tsc --noEmit && vite build
+```
+
+### CI
+A GitHub Actions workflow (`.github/workflows/ci.yml`) runs three jobs on every
+push / pull request: **lint** (ruff), **test** (pytest), and **dashboard**
+(eslint + typecheck + build).
+
+---
+
 ## 🛡️ Security
 
 Open-PC is designed as a **sandboxed environment**:

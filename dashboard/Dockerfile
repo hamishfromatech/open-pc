@@ -3,7 +3,7 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 COPY package*.json ./
-RUN npm install
+RUN npm ci
 COPY . .
 # Optional REST auth token baked into the build (sent as X-OpenPC-Token)
 ARG VITE_OPENPC_TOKEN=""
