@@ -102,6 +102,8 @@ Default password: `openpc`
 - Resource limits prevent runaway processes
 - Persistent storage for session data
 - Health monitoring and auto-restart
+- Optional REST API token authentication (`REST_AUTH_TOKEN`)
+- Shell command sanitization blocks dangerous injection constructs
 
 ---
 
@@ -173,14 +175,14 @@ Develop and test robotic process automation workflows in a safe sandbox before d
 
 ### MCP Server (Recommended)
 
-Open-PC includes a native **FastMCP server** for seamless integration with AI assistants:
+Open-PC includes a native **FastMCP server** (v3.x) for seamless integration with AI assistants:
 
 ```json
 {
   "mcpServers": {
     "open-pc": {
-      "type": "streamable-http",
-      "url": "http://localhost:8091"
+      "type": "sse",
+      "url": "http://localhost:8091/sse"
     }
   }
 }
@@ -221,6 +223,16 @@ curl -X POST http://localhost:8090/apps/open-url \
   -d '{"url": "https://github.com"}'
 ```
 
+> **Token authentication:** If you set `REST_AUTH_TOKEN` in `.env`, every REST
+> endpoint (except `/health`) requires a token via the `X-OpenPC-Token` header
+> (or `Authorization: Bearer <token>`):
+>
+> ```bash
+> curl -H "X-OpenPC-Token: your-secret-token" http://localhost:8090/screenshot --output screen.png
+> ```
+>
+> When unset, the REST API remains open (backwards compatible).
+
 ---
 
 ## ⚙️ Configuration
@@ -232,6 +244,7 @@ curl -X POST http://localhost:8090/apps/open-url \
 | `VNC_PASSWORD` | `openpc` | Desktop access password |
 | `VNC_RESOLUTION` | `1920x1080` | Screen resolution |
 | `AUTH_REQUIRED` | `true` | Require WebSocket authentication |
+| `REST_AUTH_TOKEN` | _(empty)_ | Optional token to protect REST endpoints (sent via `X-OpenPC-Token` header). Empty = open |
 
 ### Ports
 
@@ -252,7 +265,8 @@ Open-PC is designed as a **sandboxed environment**:
 - ✅ **Isolated Container** — Runs in Docker, separate from your host system
 - ✅ **Network Isolation** — Internal Docker network for service communication
 - ✅ **Resource Limits** — CPU and memory constraints prevent runaway processes
-- ✅ **Authentication** — Password protection for VNC and WebSocket access
+- ✅ **Authentication** — Password protection for VNC and WebSocket access, plus optional REST API token (`REST_AUTH_TOKEN`)
+- ✅ **Command Sanitization** — `run_command` blocks shell chaining/injection constructs
 - ✅ **No Host Access** — Container has no access to host filesystem or devices
 
 **Recommended for production:**
@@ -271,7 +285,7 @@ Open-PC is designed as a **sandboxed environment**:
 | VNC | TigerVNC + noVNC |
 | Backend | Python 3 + FastAPI + Uvicorn |
 | Automation | PyAutoGUI, MSS, python-xlib |
-| MCP | FastMCP with SSE transport |
+| MCP | FastMCP v3.x (SSE transport) |
 | Frontend | React 18 + Vite + TypeScript |
 | Browser | Google Chrome |
 
