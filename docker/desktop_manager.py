@@ -7,6 +7,7 @@ import os
 import time
 import subprocess
 import logging
+import threading
 from typing import Optional, Tuple, List, Dict, Any
 from dataclasses import dataclass
 from enum import Enum
@@ -19,13 +20,25 @@ from PIL import Image
 import io
 import base64
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Shared logger — agent_server.py configures the root handler;
+# this module only sets its name and propagation.
+import sys as _sys
+_logger_handler = logging.StreamHandler(_sys.stdout)
+_logger_handler.setFormatter(logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+))
 logger = logging.getLogger(__name__)
+logger.addHandler(_logger_handler)
+logger.setLevel(logging.INFO)
 
 # Set pyautogui settings
 pyautogui.PAUSE = 0.1
 pyautogui.FAILSAFE = False
+
+# Thread-local mss instance for performance (avoid recreate per frame)
+_thread_local = threading.local()
+
+from sanitization import detect_dangerous_chars
 
 
 class MouseButton(Enum):
@@ -76,6 +89,35 @@ class DesktopManager:
             logger.warning(f"Display verification failed: {e}")
             return False
 
+    def _get_mss(self):
+        """Get per-thread mss instance (create on first use)."""
+        sct = getattr(_thread_local, 'sct', None)
+        if sct is None:
+            import mss
+            sct = mss.mss()
+            _thread_local.sct = sct
+        return sct
+
+    def _grab(self, region=None) -> Optional[Image.Image]:
+        """Grab screen via mss (cached per thread). Returns PIL Image or None on failure."""
+        try:
+            sct = self._get_mss()
+            if region is None:
+                region = sct.monitors[1]
+            else:
+                # region is dict with left/top/width/height
+                region = {
+                    'left': region.get('left', 0),
+                    'top': region.get('top', 0),
+                    'width': region.get('width', sct.monitors[1]['width']),
+                    'height': region.get('height', sct.monitors[1]['height']),
+                }
+            shot = sct.grab(region)
+            return Image.frombytes('RGB', shot.size, shot.rgb)
+        except Exception as e:
+            logger.warning(f"mss grab failed: {e}")
+            return None
+
     def get_screen_info(self) -> ScreenInfo:
         """Get screen dimensions and cursor position"""
         width, height = pyautogui.size()
@@ -86,42 +128,23 @@ class DesktopManager:
 
     def take_screenshot(self) -> bytes:
         """Take a screenshot and return as PNG bytes"""
-        try:
-            # Use mss for better performance
-            import mss
-            with mss.mss() as sct:
-                monitor = sct.monitors[1]  # Primary monitor
-                screenshot = sct.grab(monitor)
-                img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
-                buffer = io.BytesIO()
-                img.save(buffer, format='PNG', optimize=True)
-                return buffer.getvalue()
-        except Exception as e:
-            logger.error(f"MSS screenshot failed, falling back to pyautogui: {e}")
-            # Fallback to pyautogui
-            screenshot = pyautogui.screenshot()
-            buffer = io.BytesIO()
-            screenshot.save(buffer, format='PNG')
-            return buffer.getvalue()
+        img = self._grab()
+        if img is None:
+            logger.error("mss failed, falling back to pyautogui")
+            img = pyautogui.screenshot()
+        buffer = io.BytesIO()
+        img.save(buffer, format='PNG', optimize=True)
+        return buffer.getvalue()
 
     def take_screenshot_jpeg(self, quality: int = 80) -> bytes:
         """Take a screenshot and return as JPEG bytes (faster for streaming)"""
-        try:
-            import mss
-            with mss.mss() as sct:
-                monitor = sct.monitors[1]  # Primary monitor
-                screenshot = sct.grab(monitor)
-                img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
-                buffer = io.BytesIO()
-                img.save(buffer, format='JPEG', quality=quality)
-                return buffer.getvalue()
-        except Exception as e:
-            logger.error(f"JPEG screenshot failed: {e}")
-            # Fallback to pyautogui
-            screenshot = pyautogui.screenshot()
-            buffer = io.BytesIO()
-            screenshot.save(buffer, format='JPEG', quality=quality)
-            return buffer.getvalue()
+        img = self._grab()
+        if img is None:
+            logger.warning("mss failed for JPEG, falling back to pyautogui")
+            img = pyautogui.screenshot()
+        buffer = io.BytesIO()
+        img.save(buffer, format='JPEG', quality=quality)
+        return buffer.getvalue()
 
     def take_screenshot_base64(self) -> str:
         """Take a screenshot and return as base64 string"""
@@ -130,44 +153,23 @@ class DesktopManager:
 
     def take_screenshot_region(self, x: int, y: int, width: int, height: int) -> bytes:
         """Take a screenshot of a specific region"""
-        try:
-            import mss
-            with mss.mss() as sct:
-                monitor = {"left": x, "top": y, "width": width, "height": height}
-                screenshot = sct.grab(monitor)
-                img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
-                buffer = io.BytesIO()
-                img.save(buffer, format='PNG')
-                return buffer.getvalue()
-        except Exception:
-            screenshot = pyautogui.screenshot(region=(x, y, width, height))
-            buffer = io.BytesIO()
-            screenshot.save(buffer, format='PNG')
-            return buffer.getvalue()
-
-    def take_screenshot_jpeg(self, quality: int = 80) -> bytes:
-        """Take a screenshot and return as JPEG bytes (faster for streaming)"""
-        try:
-            import mss
-            with mss.mss() as sct:
-                monitor = sct.monitors[1]  # Primary monitor
-                screenshot = sct.grab(monitor)
-                img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
-                buffer = io.BytesIO()
-                img.save(buffer, format='JPEG', quality=quality)
-                return buffer.getvalue()
-        except Exception as e:
-            logger.error(f"MSS screenshot failed, falling back to pyautogui: {e}")
-            screenshot = pyautogui.screenshot()
-            buffer = io.BytesIO()
-            screenshot.save(buffer, format='JPEG', quality=quality)
-            return buffer.getvalue()
+        region = {'left': x, 'top': y, 'width': width, 'height': height}
+        img = self._grab(region)
+        if img is None:
+            logger.warning("mss region failed, falling back to pyautogui")
+            img = pyautogui.screenshot(region=(x, y, width, height))
+        buffer = io.BytesIO()
+        img.save(buffer, format='PNG')
+        return buffer.getvalue()
 
     # ============== Mouse Methods ==============
 
     def mouse_move(self, x: int, y: int, duration: float = 0.0) -> Dict[str, Any]:
-        """Move mouse to coordinates"""
+        """Move mouse to coordinates (clamped to screen bounds)"""
         try:
+            screen_w, screen_h = pyautogui.size()
+            x = max(0, min(x, screen_w - 1))
+            y = max(0, min(y, screen_h - 1))
             if duration > 0:
                 pyautogui.moveTo(x, y, duration=duration)
             else:
@@ -212,8 +214,13 @@ class DesktopManager:
         return self.mouse_click(x, y, button=MouseButton.RIGHT)
 
     def mouse_drag(self, start_x: int, start_y: int, end_x: int, end_y: int, duration: float = 0.5) -> Dict[str, Any]:
-        """Drag mouse from start to end"""
+        """Drag mouse from start to end (coordinates clamped to screen bounds)"""
         try:
+            screen_w, screen_h = pyautogui.size()
+            start_x = max(0, min(start_x, screen_w - 1))
+            start_y = max(0, min(start_y, screen_h - 1))
+            end_x = max(0, min(end_x, screen_w - 1))
+            end_y = max(0, min(end_y, screen_h - 1))
             pyautogui.moveTo(start_x, start_y)
             pyautogui.drag(end_x - start_x, end_y - start_y, duration=duration)
             return {
@@ -225,10 +232,13 @@ class DesktopManager:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def mouse_scroll(self, clicks: int, direction: str = "down", x: Optional[int] = None, y: Optional[int] = None) -> Dict[str, Any]:
-        """Scroll mouse wheel"""
+    def mouse_scroll(self, clicks: int = 3, direction: str = "down", x: Optional[int] = None, y: Optional[int] = None) -> Dict[str, Any]:
+        """Scroll mouse wheel (default 3 clicks for reliability)"""
         try:
             if x is not None and y is not None:
+                screen_w, screen_h = pyautogui.size()
+                x = max(0, min(x, screen_w - 1))
+                y = max(0, min(y, screen_h - 1))
                 pyautogui.moveTo(x, y)
 
             scroll_amount = clicks if direction == "down" else -clicks
@@ -318,30 +328,42 @@ class DesktopManager:
     def get_active_window(self) -> Optional[WindowInfo]:
         """Get currently active window"""
         try:
+            # Get window ID, geometry, and title in one call
             result = subprocess.run(
                 ['xdotool', 'getactivewindow', 'getwindowgeometry'],
                 capture_output=True,
                 text=True,
                 timeout=5
             )
-            if result.returncode == 0:
-                # Parse window info
-                lines = result.stdout.strip().split('\n')
-                window_id = None
-                x, y, w, h = 0, 0, 0, 0
+            if result.returncode != 0:
+                return None
 
-                for line in lines:
-                    if 'Window' in line:
-                        window_id = line.split()[-1]
-                    elif 'Position:' in line:
-                        parts = line.split()
-                        x, y = int(parts[1].rstrip(',')), int(parts[2])
-                    elif 'Geometry:' in line:
-                        parts = line.split()
-                        w, h = int(parts[1].rstrip('x')), int(parts[2])
+            lines = result.stdout.strip().split('\n')
+            window_id = None
+            x, y, w, h = 0, 0, 0, 0
 
-                if window_id:
-                    return WindowInfo(id=window_id, title="", x=x, y=y, width=w, height=h)
+            for line in lines:
+                if line.startswith('Window'):
+                    window_id = line.split()[-1]
+                elif line.startswith('Position:'):
+                    parts = line.split()
+                    x = int(parts[1].rstrip(','))
+                    y = int(parts[2])
+                elif line.startswith('Geometry:'):
+                    parts = line.split()
+                    w = int(parts[1].rstrip('x'))
+                    h = int(parts[2])
+
+            if window_id:
+                # Get window title
+                title_res = subprocess.run(
+                    ['xdotool', 'getactivewindow', 'getwindowname'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                title = title_res.stdout.strip() if title_res.returncode == 0 else ""
+                return WindowInfo(id=window_id, title=title, x=x, y=y, width=w, height=h)
         except Exception as e:
             logger.error(f"Failed to get active window: {e}")
         return None
@@ -420,7 +442,24 @@ class DesktopManager:
             return {"success": False, "error": str(e)}
 
     def run_command(self, command: str, timeout: int = 30) -> Dict[str, Any]:
-        """Run shell command"""
+        """Run shell command with dangerous character sanitization.
+
+        Blocks characters that enable command chaining or injection:
+        ; | & ` $() ${ } and newlines are stripped to prevent arbitrary code execution.
+        Note: Sanitization is best-effort; for production, prefer allowlisting and running
+        as an unprivileged user inside the container.
+        """
+        if not command or not command.strip():
+            return {"success": False, "error": "Empty command"}
+
+        # Detect dangerous shell constructs (delegates to pure, testable helper)
+        found = detect_dangerous_chars(command)
+
+        if found:
+            blocked = ', '.join(found)
+            return {"success": False, "error": f"Command blocked due to dangerous characters: {blocked}"}
+
+        # At this point command is considered safe enough to run
         try:
             result = subprocess.run(
                 command,
@@ -469,7 +508,15 @@ class DesktopManager:
         return pyautogui.position()
 
     def locate_on_screen(self, image_path: str, confidence: float = 0.9) -> Optional[Dict[str, Any]]:
-        """Locate an image on screen"""
+        """Locate an image on screen using template matching.
+
+        Args:
+            image_path: Path to the reference image file
+            confidence: Minimum confidence score (0-1)
+
+        Returns:
+            Dict with x, y, width, height, center or error message
+        """
         try:
             location = pyautogui.locateOnScreen(image_path, confidence=confidence)
             if location:
@@ -483,6 +530,33 @@ class DesktopManager:
                               "y": location.top + location.height // 2}
                 }
             return {"success": False, "error": "Image not found on screen"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def locate_on_screen_base64(self, image_b64: str, confidence: float = 0.9) -> Optional[Dict[str, Any]]:
+        """Locate an image on screen from a base64-encoded PNG.
+
+        Useful for API endpoints that receive images as base64 rather than file paths.
+
+        Args:
+            image_b64: Base64-encoded PNG image string
+            confidence: Minimum confidence score (0-1)
+
+        Returns:
+            Dict with x, y, width, height, center or error message
+        """
+        import tempfile
+        try:
+            img_data = base64.b64decode(image_b64)
+            img = Image.open(io.BytesIO(img_data))
+            # Write to temp file for pyautogui.locateOnScreen
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                img.save(tmp.name, 'PNG')
+                tmp_path = tmp.name
+            try:
+                return self.locate_on_screen(tmp_path, confidence)
+            finally:
+                os.unlink(tmp_path)
         except Exception as e:
             return {"success": False, "error": str(e)}
 
