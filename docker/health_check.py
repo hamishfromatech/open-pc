@@ -4,8 +4,8 @@ Open-PC Health Check Script
 Used by Docker HEALTHCHECK
 """
 
-import sys
 import os
+import sys
 
 # Add to path
 sys.path.insert(0, '/opt/openpc')
@@ -26,8 +26,8 @@ def check_display():
 def check_agent():
     """Check if agent server is responding"""
     try:
-        import urllib.request
         import urllib.error
+        import urllib.request
 
         host = os.environ.get('AGENT_HOST', 'localhost')
         port = os.environ.get('AGENT_PORT', '8080')

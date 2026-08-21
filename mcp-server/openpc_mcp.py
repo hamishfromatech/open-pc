@@ -8,11 +8,13 @@ This allows AI assistants like Claude to control a Linux desktop environment.
 
 import asyncio
 import base64
+import json
 import os
-from typing import Optional, Dict, Any
+from contextlib import asynccontextmanager
+from typing import Any
 
-from fastmcp import FastMCP
 import aiohttp
+from fastmcp import FastMCP
 
 # ============== Configuration ==============
 
@@ -27,9 +29,10 @@ BASE_URL = f"http://{OPENPC_HOST}:{OPENPC_PORT}"
 class OpenPCClient:
     """HTTP client for Open-PC Agent Server"""
 
-    def __init__(self, base_url: str = BASE_URL):
+    def __init__(self, base_url: str = BASE_URL, token: str = OPENPC_PASSWORD):
         self.base_url = base_url
-        self.session: Optional[aiohttp.ClientSession] = None
+        self.token = token or ''
+        self.session: aiohttp.ClientSession | None = None
 
     async def connect(self):
         """Initialize HTTP session"""
@@ -42,12 +45,18 @@ class OpenPCClient:
             await self.session.close()
             self.session = None
 
-    async def request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
+    async def request(self, method: str, endpoint: str, **kwargs) -> dict[str, Any]:
         """Make HTTP request to agent server"""
         await self.connect()
 
         url = f"{self.base_url}{endpoint}"
         kwargs.setdefault('timeout', aiohttp.ClientTimeout(total=60))
+
+        # Attach REST auth token if configured (end-to-end with agent REST_AUTH_TOKEN)
+        if self.token:
+            headers = kwargs.get('headers') or {}
+            headers.setdefault('X-OpenPC-Token', self.token)
+            kwargs['headers'] = headers
 
         try:
             async with self.session.request(method, url, **kwargs) as response:
@@ -59,16 +68,16 @@ class OpenPCClient:
                 else:
                     data = await response.read()
                     return {"success": response.status == 200, "data": data.decode()}
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return {"success": False, "error": "Request timeout"}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    async def get(self, endpoint: str) -> Dict[str, Any]:
+    async def get(self, endpoint: str) -> dict[str, Any]:
         """GET request"""
         return await self.request('GET', endpoint)
 
-    async def post(self, endpoint: str, json_data: dict = None) -> Dict[str, Any]:
+    async def post(self, endpoint: str, json_data: dict = None) -> dict[str, Any]:
         """POST request"""
         return await self.request('POST', endpoint, json=json_data)
 
@@ -79,8 +88,16 @@ client = OpenPCClient()
 
 # ============== FastMCP Server ==============
 
+
+@asynccontextmanager
+async def app_lifespan(server):
+    """Manage the HTTP client lifecycle (close session on shutdown)."""
+    yield
+    await client.close()
+
+
 # Use SSE transport for better compatibility with MCP clients
-mcp = FastMCP("Open-PC Desktop Control")
+mcp = FastMCP("Open-PC Desktop Control", lifespan=app_lifespan)
 
 
 # ============== Screenshot Tools ==============
@@ -104,7 +121,7 @@ async def take_screenshot() -> str:
 
 
 @mcp.tool()
-async def get_screen_size() -> Dict[str, int]:
+async def get_screen_size() -> dict[str, int]:
     """
     Get the screen dimensions and current mouse position.
 
@@ -547,7 +564,6 @@ async def wait_seconds(seconds: float) -> str:
 @mcp.resource("desktop://status")
 async def get_desktop_status() -> str:
     """Get current desktop status as a resource"""
-    import json
     await client.connect()
 
     screen = await client.get('/screen')
@@ -564,9 +580,9 @@ async def get_desktop_status() -> str:
 # ============== Main Entry Point ==============
 
 if __name__ == "__main__":
-    print(f"Starting Open-PC MCP Server...")
+    print("Starting Open-PC MCP Server...")
     print(f"Connecting to Open-PC Agent at: {BASE_URL}")
-    print(f"MCP Server running on: http://0.0.0.0:8000")
+    print("MCP Server running on: http://0.0.0.0:8000")
 
     # Run with SSE transport, binding to 0.0.0.0 for Docker
     mcp.run(transport="sse", host="0.0.0.0", port=8000)

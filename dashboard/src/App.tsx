@@ -3,6 +3,9 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 // API base URL
 const API_BASE = '/api'
 
+// Optional REST auth token (set at build time via VITE_OPENPC_TOKEN)
+const AUTH_TOKEN = import.meta.env.VITE_OPENPC_TOKEN
+
 // Types
 interface ScreenInfo {
   width: number
@@ -20,10 +23,17 @@ interface WindowInfo {
   height: number
 }
 
+// Build headers, attaching the auth token when configured
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...(extra || {}) }
+  if (AUTH_TOKEN) headers['X-OpenPC-Token'] = AUTH_TOKEN
+  return headers
+}
+
 // API functions
 const api = {
   async get(endpoint: string) {
-    const response = await fetch(`${API_BASE}${endpoint}`)
+    const response = await fetch(`${API_BASE}${endpoint}`, { headers: authHeaders() })
     if (!response.ok) throw new Error(`API error: ${response.status}`)
     return response.json()
   },
@@ -31,7 +41,7 @@ const api = {
   async post(endpoint: string, data?: Record<string, unknown>) {
     const response = await fetch(`${API_BASE}${endpoint}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: data ? JSON.stringify(data) : undefined
     })
     if (!response.ok) throw new Error(`API error: ${response.status}`)
@@ -49,7 +59,19 @@ function App() {
   const [logs, setLogs] = useState<string[]>([])
 
   // MJPEG stream URL - browser handles streaming automatically
-  const streamUrl = `${API_BASE}/stream?fps=30&quality=80`
+  // Append auth token as query param when configured (img tags can't set headers)
+  const streamUrl = `${API_BASE}/stream?fps=30&quality=80${AUTH_TOKEN ? `&token=${encodeURIComponent(AUTH_TOKEN)}` : ''}`
+
+  // Stream reconnect: bumping this key forces the <img> to reload
+  const [streamKey, setStreamKey] = useState(0)
+  const streamRetry = useRef<number | null>(null)
+  const handleStreamError = useCallback(() => {
+    if (streamRetry.current) return
+    streamRetry.current = window.setTimeout(() => {
+      streamRetry.current = null
+      setStreamKey(k => k + 1)
+    }, 2000)
+  }, [])
 
   // Mouse tracking
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 })
@@ -129,7 +151,6 @@ function App() {
   const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!screenInfo || !screenRef.current) return
 
-    const rect = screenRef.current.getBoundingClientRect()
     const img = screenRef.current.querySelector('img')
     if (!img) return
 
@@ -182,9 +203,11 @@ function App() {
         {/* Screen View - MJPEG Stream */}
         <div className="screen-container" ref={screenRef} onMouseMove={handleMouseMove}>
           <img
+            key={streamKey}
             src={streamUrl}
             alt="Desktop Stream"
             onClick={handleScreenClick}
+            onError={handleStreamError}
             style={{ width: '100%', height: 'auto' }}
           />
           <div className="screenshot-info">

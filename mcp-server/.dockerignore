@@ -1,0 +1,10 @@
+# Exclude build artifacts and secrets from the MCP server build context
+.env
+.env.*
+.git
+__pycache__/
+*.pyc
+*.pyo
+*.md
+.pytest_cache/
+.mypy_cache/

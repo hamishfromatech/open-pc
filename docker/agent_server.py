@@ -10,23 +10,23 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 import time
 import uuid
-from typing import Dict, Any, Optional, Set, List
-from dataclasses import dataclass, asdict
 from contextlib import asynccontextmanager
+from dataclasses import asdict
+from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
-from fastapi.responses import Response, JSONResponse, StreamingResponse
+from desktop_manager import DesktopManager, MouseButton
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-import websockets
-
-from desktop_manager import DesktopManager, MouseButton
+from slowapi.util import get_remote_address
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # ============== Rate Limiting ==============
 limiter = Limiter(key_func=get_remote_address)
@@ -54,11 +54,10 @@ REST_AUTH_TOKEN = os.environ.get('REST_AUTH_TOKEN', '')
 AUTH_REQUIRED = os.environ.get('AUTH_REQUIRED', 'true').lower() == 'true'
 
 # Global desktop manager
-desktop_manager: Optional[DesktopManager] = None
+desktop_manager: DesktopManager | None = None
+
 
 # REST API token authentication
-import secrets
-
 def require_token(request: Request):
     """Require API token if REST_AUTH_TOKEN is set."""
     if not REST_AUTH_TOKEN:
@@ -81,8 +80,8 @@ class MouseMoveRequest(BaseModel):
 
 
 class MouseClickRequest(BaseModel):
-    x: Optional[int] = Field(None, ge=0, description="X coordinate (>= 0)")
-    y: Optional[int] = Field(None, ge=0, description="Y coordinate (>= 0)")
+    x: int | None = Field(None, ge=0, description="X coordinate (>= 0)")
+    y: int | None = Field(None, ge=0, description="Y coordinate (>= 0)")
     button: str = Field("left", pattern=r"^(left|right|middle)$")
     clicks: int = Field(ge=1, le=3, default=1, description="Number of clicks (1-3)")
     duration: float = Field(ge=0.0, default=0.0, description="Animation duration in seconds")
@@ -91,8 +90,8 @@ class MouseClickRequest(BaseModel):
 class MouseScrollRequest(BaseModel):
     clicks: int = Field(ge=1, default=3, description="Number of scroll lines")
     direction: str = Field("down", pattern=r"^(up|down)$")
-    x: Optional[int] = Field(None, ge=0, description="X coordinate (>= 0)")
-    y: Optional[int] = Field(None, ge=0, description="Y coordinate (>= 0)")
+    x: int | None = Field(None, ge=0, description="X coordinate (>= 0)")
+    y: int | None = Field(None, ge=0, description="Y coordinate (>= 0)")
 
 
 class MouseDragRequest(BaseModel):
@@ -113,16 +112,16 @@ class KeyboardKeyRequest(BaseModel):
 
 
 class KeyboardHotkeyRequest(BaseModel):
-    keys: List[str] = Field(min_length=1, max_length=10, description="Keys for hotkey combination (max 10)")
+    keys: list[str] = Field(min_length=1, max_length=10, description="Keys for hotkey combination (max 10)")
 
 
 class CommandRequest(BaseModel):
     command: str
-    parameters: Optional[Dict[str, Any]] = None
+    parameters: dict[str, Any] | None = None
 
 
 class WindowRequest(BaseModel):
-    window_id: Optional[str] = None
+    window_id: str | None = None
 
 
 class RunCommandRequest(BaseModel):
@@ -151,18 +150,18 @@ class LocateOnScreenBase64Request(BaseModel):
 
 class BatchStep(BaseModel):
     type: str  # 'click', 'move_mouse', 'type', 'press', 'hotkey', 'wait', etc.
-    parameters: Dict[str, Any] = Field(default_factory=dict)
+    parameters: dict[str, Any] = Field(default_factory=dict)
 
 
 class BatchRequest(BaseModel):
-    steps: List[BatchStep] = Field(min_length=1, max_length=50)
+    steps: list[BatchStep] = Field(min_length=1, max_length=50)
 
 
 class OCRRequest(BaseModel):
-    x: Optional[int] = Field(None, ge=0)
-    y: Optional[int] = Field(None, ge=0)
-    width: Optional[int] = Field(None, gt=0)
-    height: Optional[int] = Field(None, gt=0)
+    x: int | None = Field(None, ge=0)
+    y: int | None = Field(None, ge=0)
+    width: int | None = Field(None, gt=0)
+    height: int | None = Field(None, gt=0)
 
 
 # ============== WebSocket Connection Manager ==============
@@ -171,8 +170,8 @@ class ConnectionManager:
     """Manages WebSocket connections"""
 
     def __init__(self):
-        self.active_connections: Set[WebSocket] = set()
-        self.authenticated_connections: Set[WebSocket] = set()
+        self.active_connections: set[WebSocket] = set()
+        self.authenticated_connections: set[WebSocket] = set()
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -213,7 +212,7 @@ async def lifespan(app: FastAPI):
             screen_info = desktop_manager.get_screen_info()
             logger.info(f"Display ready. Screen: {screen_info.width}x{screen_info.height}")
             break
-        except Exception as e:
+        except Exception:
             logger.warning(f"Waiting for display... ({attempt + 1}/{max_attempts})")
             await asyncio.sleep(1)
     else:
@@ -235,8 +234,6 @@ app = FastAPI(
 )
 
 # REST token authentication middleware (skip /health and /)
-from starlette.middleware.base import BaseHTTPMiddleware
-
 class TokenAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         if REST_AUTH_TOKEN:
@@ -247,6 +244,9 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
                     auth = request.headers.get('Authorization', '')
                     if auth.startswith('Bearer '):
                         token = auth[len('Bearer '):].strip()
+                # Also accept ?token=... (needed for <img> MJPEG streams that can't set headers)
+                if not token:
+                    token = request.query_params.get('token')
                 if not token or not secrets.compare_digest(token, REST_AUTH_TOKEN):
                     from fastapi.responses import JSONResponse
                     return JSONResponse(status_code=401, content={'detail': 'Invalid or missing API token (X-OpenPC-Token)'})
@@ -293,7 +293,7 @@ async def root():
 
 
 @app.get("/health")
-async def health():
+def health():
     """Health check endpoint"""
     try:
         screen_info = desktop_manager.get_screen_info()
@@ -323,7 +323,7 @@ def get_screenshot():
         img_bytes = desktop_manager.take_screenshot()
         return Response(content=img_bytes, media_type="image/png")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @limiter.limit("60/minute")
@@ -334,7 +334,7 @@ def get_screenshot_base64():
         b64 = desktop_manager.take_screenshot_base64()
         return {"success": True, "image": b64}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @limiter.limit("60/minute")
@@ -345,7 +345,7 @@ def get_screenshot_region(x: int, y: int, width: int, height: int):
         img_bytes = desktop_manager.take_screenshot_region(x, y, width, height)
         return Response(content=img_bytes, media_type="image/png")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 # Image matching API endpoints (template recognition)
@@ -357,7 +357,7 @@ async def locate_on_screen(request: LocateOnScreenRequest):
         result = await _blocking(desktop_manager.locate_on_screen, request.image_path, request.confidence)
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @limiter.limit("30/minute")
@@ -368,7 +368,7 @@ async def locate_on_screen_base64(request: LocateOnScreenBase64Request):
         result = await _blocking(desktop_manager.locate_on_screen_base64, request.image_b64, request.confidence)
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 # ============== Batch / Compound Operations ==============
@@ -377,7 +377,7 @@ async def locate_on_screen_base64(request: LocateOnScreenBase64Request):
 async def batch_operations(request: BatchRequest):
     """Execute a sequence of operations atomically (click, type, wait, etc)."""
     steps = request.steps
-    results: List[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     for step in steps:
         stype = step.type
         params = step.parameters
@@ -408,8 +408,8 @@ async def video_stream(fps: int = 30, quality: int = 80):
         frame_interval = 1.0 / fps
         while True:
             try:
-                # Capture frame as JPEG
-                frame_bytes = desktop_manager.take_screenshot_jpeg(quality=quality)
+                # Capture frame as JPEG (offload blocking capture to a thread)
+                frame_bytes = await _blocking(desktop_manager.take_screenshot_jpeg, quality=quality)
 
                 # MJPEG frame format
                 yield (
@@ -432,7 +432,7 @@ async def video_stream(fps: int = 30, quality: int = 80):
 # ============== Screen Info ==============
 
 @app.get("/screen")
-async def get_screen_info():
+def get_screen_info():
     """Get screen dimensions and cursor position"""
     try:
         info = desktop_manager.get_screen_info()
@@ -443,20 +443,20 @@ async def get_screen_info():
             "cursor_y": info.cursor_y
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 # ============== Mouse Endpoints ==============
 
 @app.post("/mouse/move")
-async def mouse_move(request: MouseMoveRequest):
+def mouse_move(request: MouseMoveRequest):
     """Move mouse to position"""
     result = desktop_manager.mouse_move(request.x, request.y, request.duration)
     return result
 
 
 @app.post("/mouse/click")
-async def mouse_click(request: MouseClickRequest):
+def mouse_click(request: MouseClickRequest):
     """Perform mouse click"""
     button = MouseButton(request.button)
     result = desktop_manager.mouse_click(
@@ -466,28 +466,28 @@ async def mouse_click(request: MouseClickRequest):
 
 
 @app.post("/mouse/double-click")
-async def mouse_double_click(request: MouseClickRequest):
+def mouse_double_click(request: MouseClickRequest):
     """Perform double click"""
     result = desktop_manager.mouse_double_click(request.x, request.y)
     return result
 
 
 @app.post("/mouse/right-click")
-async def mouse_right_click(request: MouseClickRequest):
+def mouse_right_click(request: MouseClickRequest):
     """Perform right click"""
     result = desktop_manager.mouse_right_click(request.x, request.y)
     return result
 
 
 @app.post("/mouse/scroll")
-async def mouse_scroll(request: MouseScrollRequest):
+def mouse_scroll(request: MouseScrollRequest):
     """Scroll mouse wheel"""
     result = desktop_manager.mouse_scroll(request.clicks, request.direction, request.x, request.y)
     return result
 
 
 @app.post("/mouse/drag")
-async def mouse_drag(request: MouseDragRequest):
+def mouse_drag(request: MouseDragRequest):
     """Drag mouse from start to end"""
     result = desktop_manager.mouse_drag(
         request.start_x, request.start_y, request.end_x, request.end_y, request.duration
@@ -496,7 +496,7 @@ async def mouse_drag(request: MouseDragRequest):
 
 
 @app.get("/mouse/position")
-async def get_mouse_position():
+def get_mouse_position():
     """Get current mouse position"""
     x, y = desktop_manager.get_mouse_position()
     return {"x": x, "y": y}
@@ -505,35 +505,35 @@ async def get_mouse_position():
 # ============== Keyboard Endpoints ==============
 
 @app.post("/keyboard/type")
-async def keyboard_type(request: KeyboardTypeRequest):
+def keyboard_type(request: KeyboardTypeRequest):
     """Type text"""
     result = desktop_manager.keyboard_type(request.text, request.interval)
     return result
 
 
 @app.post("/keyboard/press")
-async def keyboard_press(request: KeyboardKeyRequest):
+def keyboard_press(request: KeyboardKeyRequest):
     """Press a key"""
     result = desktop_manager.keyboard_press(request.key)
     return result
 
 
 @app.post("/keyboard/hotkey")
-async def keyboard_hotkey(request: KeyboardHotkeyRequest):
+def keyboard_hotkey(request: KeyboardHotkeyRequest):
     """Press keyboard combination"""
     result = desktop_manager.keyboard_hotkey(*request.keys)
     return result
 
 
 @app.post("/keyboard/down")
-async def keyboard_down(request: KeyboardKeyRequest):
+def keyboard_down(request: KeyboardKeyRequest):
     """Hold key down"""
     result = desktop_manager.keyboard_key_down(request.key)
     return result
 
 
 @app.post("/keyboard/up")
-async def keyboard_up(request: KeyboardKeyRequest):
+def keyboard_up(request: KeyboardKeyRequest):
     """Release key"""
     result = desktop_manager.keyboard_key_up(request.key)
     return result
@@ -542,14 +542,14 @@ async def keyboard_up(request: KeyboardKeyRequest):
 # ============== Window Endpoints ==============
 
 @app.get("/windows")
-async def list_windows():
+def list_windows():
     """List all windows"""
     windows = desktop_manager.list_windows()
     return {"windows": [asdict(w) for w in windows]}
 
 
 @app.get("/windows/active")
-async def get_active_window():
+def get_active_window():
     """Get active window"""
     window = desktop_manager.get_active_window()
     if window:
@@ -558,28 +558,28 @@ async def get_active_window():
 
 
 @app.post("/windows/focus")
-async def focus_window(request: WindowRequest):
+def focus_window(request: WindowRequest):
     """Focus a window"""
     result = desktop_manager.focus_window(request.window_id)
     return result
 
 
 @app.post("/windows/close")
-async def close_window(request: WindowRequest):
+def close_window(request: WindowRequest):
     """Close a window"""
     result = desktop_manager.close_window(request.window_id)
     return result
 
 
 @app.post("/windows/maximize")
-async def maximize_window(request: WindowRequest):
+def maximize_window(request: WindowRequest):
     """Maximize a window"""
     result = desktop_manager.maximize_window(request.window_id)
     return result
 
 
 @app.post("/windows/minimize")
-async def minimize_window(request: WindowRequest):
+def minimize_window(request: WindowRequest):
     """Minimize a window"""
     result = desktop_manager.minimize_window(request.window_id)
     return result
@@ -588,21 +588,21 @@ async def minimize_window(request: WindowRequest):
 # ============== Application Endpoints ==============
 
 @app.post("/apps/launch")
-async def launch_app(request: LaunchRequest):
+def launch_app(request: LaunchRequest):
     """Launch an application"""
     result = desktop_manager.launch_application(request.application)
     return result
 
 
 @app.post("/apps/open-url")
-async def open_url(request: URLRequest):
+def open_url(request: URLRequest):
     """Open URL in browser"""
     result = desktop_manager.open_url(request.url, request.browser)
     return result
 
 
 @app.post("/apps/run")
-async def run_command(request: RunCommandRequest):
+def run_command(request: RunCommandRequest):
     """Run shell command"""
     result = desktop_manager.run_command(request.command, request.timeout)
     return result
@@ -612,7 +612,7 @@ async def run_command(request: RunCommandRequest):
 
 @app.post("/ocr")
 @limiter.limit("5/minute")
-async def ocr_screenshot(request: Optional[OCRRequest] = None):
+def ocr_screenshot(request: OCRRequest | None = None):
     """Perform OCR on screenshot"""
     region = None
     if request and all([request.x is not None, request.y is not None,
@@ -694,7 +694,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         "data": result
                     })
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Send keepalive
                 await websocket.send_json({"type": "ping"})
                 continue
@@ -715,18 +715,24 @@ async def websocket_endpoint(websocket: WebSocket):
         connection_manager.disconnect(websocket)
 
 
-async def execute_command(command: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute a desktop command"""
+async def execute_command(command: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Execute a desktop command.
+
+    All blocking desktop_manager calls are offloaded to a worker thread via
+    asyncio.to_thread so the event loop (and other WS clients) stay responsive.
+    """
     try:
         if command == "screenshot":
+            screenshot = await _blocking(desktop_manager.take_screenshot_base64)
             return {
                 "success": True,
-                "screenshot": desktop_manager.take_screenshot_base64(),
+                "screenshot": screenshot,
                 "timestamp": time.time()
             }
 
         elif command == "click":
-            return desktop_manager.mouse_click(
+            return await _blocking(
+                desktop_manager.mouse_click,
                 params.get('x'), params.get('y'),
                 MouseButton(params.get('button', 'left')),
                 params.get('clicks', 1),
@@ -734,79 +740,90 @@ async def execute_command(command: str, params: Dict[str, Any]) -> Dict[str, Any
             )
 
         elif command == "double_click":
-            return desktop_manager.mouse_double_click(params.get('x'), params.get('y'))
+            return await _blocking(
+                desktop_manager.mouse_double_click, params.get('x'), params.get('y')
+            )
 
         elif command == "right_click":
-            return desktop_manager.mouse_right_click(params.get('x'), params.get('y'))
+            return await _blocking(
+                desktop_manager.mouse_right_click, params.get('x'), params.get('y')
+            )
 
         elif command == "move_mouse":
-            return desktop_manager.mouse_move(
-                params['x'], params['y'],
-                params.get('duration', 0.0)
+            return await _blocking(
+                desktop_manager.mouse_move,
+                params['x'], params['y'], params.get('duration', 0.0)
             )
 
         elif command == "drag":
-            return desktop_manager.mouse_drag(
+            return await _blocking(
+                desktop_manager.mouse_drag,
                 params['start_x'], params['start_y'],
                 params['end_x'], params['end_y'],
                 params.get('duration', 0.5)
             )
 
         elif command == "scroll":
-            return desktop_manager.mouse_scroll(
+            return await _blocking(
+                desktop_manager.mouse_scroll,
                 params.get('clicks', 3),
                 params.get('direction', 'down'),
                 params.get('x'), params.get('y')
             )
 
         elif command == "type":
-            return desktop_manager.keyboard_type(
-                params['text'],
-                params.get('interval', 0.05)
+            return await _blocking(
+                desktop_manager.keyboard_type,
+                params['text'], params.get('interval', 0.05)
             )
 
         elif command == "press":
-            return desktop_manager.keyboard_press(params['key'])
+            return await _blocking(desktop_manager.keyboard_press, params['key'])
 
         elif command == "hotkey":
-            return desktop_manager.keyboard_hotkey(*params['keys'])
+            keys = params['keys']
+            return await _blocking(lambda: desktop_manager.keyboard_hotkey(*keys))
 
         elif command == "key_down":
-            return desktop_manager.keyboard_key_down(params['key'])
+            return await _blocking(desktop_manager.keyboard_key_down, params['key'])
 
         elif command == "key_up":
-            return desktop_manager.keyboard_key_up(params['key'])
+            return await _blocking(desktop_manager.keyboard_key_up, params['key'])
 
         elif command == "list_windows":
-            windows = desktop_manager.list_windows()
+            windows = await _blocking(desktop_manager.list_windows)
             return {"success": True, "windows": [asdict(w) for w in windows]}
 
         elif command == "focus_window":
-            return desktop_manager.focus_window(params['window_id'])
+            return await _blocking(desktop_manager.focus_window, params['window_id'])
 
         elif command == "close_window":
-            return desktop_manager.close_window(params.get('window_id'))
+            return await _blocking(desktop_manager.close_window, params.get('window_id'))
 
         elif command == "maximize_window":
-            return desktop_manager.maximize_window(params.get('window_id'))
+            return await _blocking(desktop_manager.maximize_window, params.get('window_id'))
 
         elif command == "minimize_window":
-            return desktop_manager.minimize_window(params.get('window_id'))
+            return await _blocking(desktop_manager.minimize_window, params.get('window_id'))
 
         elif command == "launch":
-            return desktop_manager.launch_application(params['application'])
+            return await _blocking(desktop_manager.launch_application, params['application'])
 
         elif command == "open_url":
-            return desktop_manager.open_url(params['url'], params.get('browser', 'google-chrome'))
+            return await _blocking(
+                desktop_manager.open_url, params['url'], params.get('browser', 'google-chrome')
+            )
 
         elif command == "run_command":
-            return desktop_manager.run_command(params['command'], params.get('timeout', 30))
+            return await _blocking(
+                desktop_manager.run_command, params['command'], params.get('timeout', 30)
+            )
 
         elif command == "ocr":
-            return desktop_manager.ocr_screenshot()
+            return await _blocking(desktop_manager.ocr_screenshot)
 
         elif command == "screen_info":
-            info = desktop_manager.get_screen_info()
+            info = await _blocking(desktop_manager.get_screen_info)
             return {"success": True, "screen": asdict(info)}
 
         elif command == "wait":
