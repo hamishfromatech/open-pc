@@ -3,26 +3,28 @@ Open-PC Desktop Manager
 Handles all desktop automation: screenshots, mouse, keyboard, windows
 """
 
-import os
-import time
-import subprocess
 import logging
+import os
+import subprocess
 import threading
-from typing import Optional, Tuple, List, Dict, Any
+import time
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 # Disable pyautogui failsafe for container environment
 os.environ['PYAUTOGUI_FAILSAFE'] = '0'
 
-import pyautogui
-from PIL import Image
-import io
 import base64
+import io
 
 # Shared logger — agent_server.py configures the root handler;
 # this module only sets its name and propagation.
 import sys as _sys
+
+import pyautogui
+from PIL import Image
+
 _logger_handler = logging.StreamHandler(_sys.stdout)
 _logger_handler.setFormatter(logging.Formatter(
     '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -98,7 +100,7 @@ class DesktopManager:
             _thread_local.sct = sct
         return sct
 
-    def _grab(self, region=None) -> Optional[Image.Image]:
+    def _grab(self, region=None) -> Image.Image | None:
         """Grab screen via mss (cached per thread). Returns PIL Image or None on failure."""
         try:
             sct = self._get_mss()
@@ -164,7 +166,7 @@ class DesktopManager:
 
     # ============== Mouse Methods ==============
 
-    def mouse_move(self, x: int, y: int, duration: float = 0.0) -> Dict[str, Any]:
+    def mouse_move(self, x: int, y: int, duration: float = 0.0) -> dict[str, Any]:
         """Move mouse to coordinates (clamped to screen bounds)"""
         try:
             screen_w, screen_h = pyautogui.size()
@@ -180,12 +182,12 @@ class DesktopManager:
 
     def mouse_click(
         self,
-        x: Optional[int] = None,
-        y: Optional[int] = None,
+        x: int | None = None,
+        y: int | None = None,
         button: MouseButton = MouseButton.LEFT,
         clicks: int = 1,
         duration: float = 0.0
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Perform mouse click"""
         try:
             if x is not None and y is not None:
@@ -205,15 +207,15 @@ class DesktopManager:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def mouse_double_click(self, x: Optional[int] = None, y: Optional[int] = None) -> Dict[str, Any]:
+    def mouse_double_click(self, x: int | None = None, y: int | None = None) -> dict[str, Any]:
         """Perform double click"""
         return self.mouse_click(x, y, clicks=2)
 
-    def mouse_right_click(self, x: Optional[int] = None, y: Optional[int] = None) -> Dict[str, Any]:
+    def mouse_right_click(self, x: int | None = None, y: int | None = None) -> dict[str, Any]:
         """Perform right click"""
         return self.mouse_click(x, y, button=MouseButton.RIGHT)
 
-    def mouse_drag(self, start_x: int, start_y: int, end_x: int, end_y: int, duration: float = 0.5) -> Dict[str, Any]:
+    def mouse_drag(self, start_x: int, start_y: int, end_x: int, end_y: int, duration: float = 0.5) -> dict[str, Any]:
         """Drag mouse from start to end (coordinates clamped to screen bounds)"""
         try:
             screen_w, screen_h = pyautogui.size()
@@ -232,7 +234,7 @@ class DesktopManager:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def mouse_scroll(self, clicks: int = 3, direction: str = "down", x: Optional[int] = None, y: Optional[int] = None) -> Dict[str, Any]:
+    def mouse_scroll(self, clicks: int = 3, direction: str = "down", x: int | None = None, y: int | None = None) -> dict[str, Any]:
         """Scroll mouse wheel (default 3 clicks for reliability)"""
         try:
             if x is not None and y is not None:
@@ -255,7 +257,7 @@ class DesktopManager:
 
     # ============== Keyboard Methods ==============
 
-    def keyboard_type(self, text: str, interval: float = 0.05) -> Dict[str, Any]:
+    def keyboard_type(self, text: str, interval: float = 0.05) -> dict[str, Any]:
         """Type text at current cursor position"""
         try:
             pyautogui.write(text, interval=interval)
@@ -263,7 +265,7 @@ class DesktopManager:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def keyboard_press(self, key: str) -> Dict[str, Any]:
+    def keyboard_press(self, key: str) -> dict[str, Any]:
         """Press a single key"""
         try:
             pyautogui.press(key)
@@ -271,7 +273,7 @@ class DesktopManager:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def keyboard_hotkey(self, *keys: str) -> Dict[str, Any]:
+    def keyboard_hotkey(self, *keys: str) -> dict[str, Any]:
         """Press keyboard combination (e.g., ctrl+c)"""
         try:
             pyautogui.hotkey(*keys)
@@ -279,7 +281,7 @@ class DesktopManager:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def keyboard_key_down(self, key: str) -> Dict[str, Any]:
+    def keyboard_key_down(self, key: str) -> dict[str, Any]:
         """Hold key down"""
         try:
             pyautogui.keyDown(key)
@@ -287,7 +289,7 @@ class DesktopManager:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def keyboard_key_up(self, key: str) -> Dict[str, Any]:
+    def keyboard_key_up(self, key: str) -> dict[str, Any]:
         """Release key"""
         try:
             pyautogui.keyUp(key)
@@ -297,7 +299,7 @@ class DesktopManager:
 
     # ============== Window Methods ==============
 
-    def list_windows(self) -> List[WindowInfo]:
+    def list_windows(self) -> list[WindowInfo]:
         """List all open windows"""
         try:
             result = subprocess.run(
@@ -325,7 +327,7 @@ class DesktopManager:
             logger.error(f"Failed to list windows: {e}")
             return []
 
-    def get_active_window(self) -> Optional[WindowInfo]:
+    def get_active_window(self) -> WindowInfo | None:
         """Get currently active window"""
         try:
             # Get window ID, geometry, and title in one call
@@ -368,7 +370,7 @@ class DesktopManager:
             logger.error(f"Failed to get active window: {e}")
         return None
 
-    def focus_window(self, window_id: str) -> Dict[str, Any]:
+    def focus_window(self, window_id: str) -> dict[str, Any]:
         """Focus a window by ID"""
         try:
             subprocess.run(
@@ -380,7 +382,7 @@ class DesktopManager:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def close_window(self, window_id: Optional[str] = None) -> Dict[str, Any]:
+    def close_window(self, window_id: str | None = None) -> dict[str, Any]:
         """Close window by ID or active window"""
         try:
             if window_id:
@@ -391,7 +393,7 @@ class DesktopManager:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def maximize_window(self, window_id: Optional[str] = None) -> Dict[str, Any]:
+    def maximize_window(self, window_id: str | None = None) -> dict[str, Any]:
         """Maximize window"""
         try:
             if window_id:
@@ -405,7 +407,7 @@ class DesktopManager:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def minimize_window(self, window_id: Optional[str] = None) -> Dict[str, Any]:
+    def minimize_window(self, window_id: str | None = None) -> dict[str, Any]:
         """Minimize window"""
         try:
             if window_id:
@@ -421,7 +423,7 @@ class DesktopManager:
 
     # ============== Application Methods ==============
 
-    def launch_application(self, app_name: str) -> Dict[str, Any]:
+    def launch_application(self, app_name: str) -> dict[str, Any]:
         """Launch an application"""
         try:
             subprocess.Popen([app_name], start_new_session=True)
@@ -430,7 +432,7 @@ class DesktopManager:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def open_url(self, url: str, browser: str = "google-chrome") -> Dict[str, Any]:
+    def open_url(self, url: str, browser: str = "google-chrome") -> dict[str, Any]:
         """Open URL in browser"""
         try:
             subprocess.Popen(
@@ -441,7 +443,7 @@ class DesktopManager:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def run_command(self, command: str, timeout: int = 30) -> Dict[str, Any]:
+    def run_command(self, command: str, timeout: int = 30) -> dict[str, Any]:
         """Run shell command with dangerous character sanitization.
 
         Blocks characters that enable command chaining or injection:
@@ -481,15 +483,12 @@ class DesktopManager:
 
     # ============== OCR Methods ==============
 
-    def ocr_screenshot(self, region: Optional[Tuple[int, int, int, int]] = None) -> Dict[str, Any]:
+    def ocr_screenshot(self, region: tuple[int, int, int, int] | None = None) -> dict[str, Any]:
         """Perform OCR on screenshot"""
         try:
             import pytesseract
 
-            if region:
-                screenshot = pyautogui.screenshot(region=region)
-            else:
-                screenshot = pyautogui.screenshot()
+            screenshot = pyautogui.screenshot(region=region) if region else pyautogui.screenshot()
 
             text = pytesseract.image_to_string(screenshot)
             return {"success": True, "text": text.strip()}
@@ -498,16 +497,16 @@ class DesktopManager:
 
     # ============== Utility Methods ==============
 
-    def wait(self, seconds: float) -> Dict[str, Any]:
+    def wait(self, seconds: float) -> dict[str, Any]:
         """Wait for specified seconds"""
         time.sleep(seconds)
         return {"success": True, "action": "wait", "seconds": seconds}
 
-    def get_mouse_position(self) -> Tuple[int, int]:
+    def get_mouse_position(self) -> tuple[int, int]:
         """Get current mouse position"""
         return pyautogui.position()
 
-    def locate_on_screen(self, image_path: str, confidence: float = 0.9) -> Optional[Dict[str, Any]]:
+    def locate_on_screen(self, image_path: str, confidence: float = 0.9) -> dict[str, Any] | None:
         """Locate an image on screen using template matching.
 
         Args:
@@ -533,7 +532,7 @@ class DesktopManager:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def locate_on_screen_base64(self, image_b64: str, confidence: float = 0.9) -> Optional[Dict[str, Any]]:
+    def locate_on_screen_base64(self, image_b64: str, confidence: float = 0.9) -> dict[str, Any] | None:
         """Locate an image on screen from a base64-encoded PNG.
 
         Useful for API endpoints that receive images as base64 rather than file paths.

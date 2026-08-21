@@ -1,0 +1,17 @@
+# Exclude secrets and local config from the desktop image build context
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+.github
+docs
+tests
+screenshots/
+*.md
+*.log
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/

@@ -5,13 +5,12 @@ Pure functions with no heavy dependencies (no pyautogui/X11) so they can be
 unit-tested in CI without a display. Imported by desktop_manager.py.
 """
 
-from typing import List
 
 # Shell metacharacters/constructs that enable command chaining or injection.
-_DANGEROUS_CHARS: List[str] = [';', '|', '&', '`', '$(', '${', '>', '<', '||', '&&', '$']
+_DANGEROUS_CHARS: list[str] = [';', '|', '&', '`', '$(', '${', '>', '<', '||', '&&', '$']
 
 
-def detect_dangerous_chars(command: str) -> List[str]:
+def detect_dangerous_chars(command: str) -> list[str]:
     """Return the list of dangerous shell constructs found in command.
 
     Returns an empty list if the command is considered safe.

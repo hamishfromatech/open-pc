@@ -18,6 +18,7 @@ services:
       - AGENT_HOST=0.0.0.0
       - AGENT_PORT=8080
       - AUTH_REQUIRED=${AUTH_REQUIRED:-true}
+      - REST_AUTH_TOKEN=${REST_AUTH_TOKEN:-}
     ports:
       - "5901:5901"    # VNC port (for VNC clients)
       - "6080:6080"    # noVNC web interface
@@ -25,14 +26,18 @@ services:
     volumes:
       - openpc-home:/home/desktop
       - openpc-logs:/var/log/openpc
+    tmpfs:
+      - /tmp
     networks:
       - openpc-network
     restart: unless-stopped
+    init: true
     shm_size: '2gb'
     cap_add:
       - SYS_ADMIN
     security_opt:
       - apparmor:unconfined
+      - no-new-privileges:true
     deploy:
       resources:
         limits:
@@ -57,7 +62,9 @@ services:
     environment:
       - OPENPC_HOST=open-pc-desktop
       - OPENPC_PORT=8080
-      - OPENPC_PASSWORD=${VNC_PASSWORD:-openpc}
+      # Prefer REST_AUTH_TOKEN so the MCP client authenticates with the same
+      # token the agent requires; fall back to VNC_PASSWORD for backward compat.
+      - OPENPC_PASSWORD=${REST_AUTH_TOKEN:-${VNC_PASSWORD:-openpc}}
     ports:
       - "8091:8000"    # MCP HTTP endpoint
     depends_on:
@@ -66,12 +73,18 @@ services:
     networks:
       - openpc-network
     restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
 
   # Web Dashboard for Real-time Viewing and Control
   open-pc-dashboard:
     build:
       context: ./dashboard
       dockerfile: Dockerfile
+      args:
+        # Forward the REST token to the Vite build so the dashboard can send it
+        - VITE_OPENPC_TOKEN=${REST_AUTH_TOKEN:-}
     container_name: open-pc-dashboard
     environment:
       - AGENT_URL=http://open-pc-desktop:8080
@@ -85,6 +98,9 @@ services:
     networks:
       - openpc-network
     restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
 
 networks:
   openpc-network:

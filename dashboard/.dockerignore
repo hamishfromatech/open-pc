@@ -1,0 +1,9 @@
+# Exclude build artifacts, deps, and secrets from the dashboard build context
+node_modules
+dist
+.git
+.env
+.env.*
+*.md
+.vite
+npm-debug.log*
