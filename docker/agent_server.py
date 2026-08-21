@@ -52,6 +52,7 @@ AGENT_PORT = int(os.environ.get('AGENT_PORT', 8080))
 VNC_PASSWORD = os.environ.get('VNC_PASSWORD', 'openpc')
 REST_AUTH_TOKEN = os.environ.get('REST_AUTH_TOKEN', '')
 AUTH_REQUIRED = os.environ.get('AUTH_REQUIRED', 'true').lower() == 'true'
+APP_VERSION = os.environ.get('APP_VERSION', '0.1.0')
 
 # Global desktop manager
 desktop_manager: DesktopManager | None = None
@@ -229,7 +230,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Open-PC Agent API",
     description="Desktop automation API for AI agents",
-    version="1.0.0",
+    version=APP_VERSION,
     lifespan=lifespan
 )
 
@@ -278,7 +279,7 @@ async def root():
     """API root"""
     return {
         "name": "Open-PC Agent Server",
-        "version": "1.0.0",
+        "version": APP_VERSION,
         "status": "running",
         "endpoints": {
             "screenshot": "/screenshot",
