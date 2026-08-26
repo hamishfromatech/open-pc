@@ -8,14 +8,18 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "generate": "openapi-ts",
+    "sync": "python ../scripts/dump_openapi.py && npm run generate"
   },
   "dependencies": {
+    "@hey-api/client-fetch": "^0.13.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",
+    "@hey-api/openapi-ts": "^0.99.0",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
     "@vitejs/plugin-react": "^4.2.0",

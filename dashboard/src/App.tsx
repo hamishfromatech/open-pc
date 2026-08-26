@@ -1,53 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { openpc, type Capabilities, type ScreenInfo, type WindowInfo } from './api/openpc'
 
-// API base URL
-const API_BASE = '/api'
-
-// Optional REST auth token (set at build time via VITE_OPENPC_TOKEN)
+// Auth token is still needed for the MJPEG <img> stream, which can't set
+// headers (it appends ?token=...). All JSON calls go through the typed SDK
+// in ./api/openpc, generated from the committed OpenAPI contract.
 const AUTH_TOKEN = import.meta.env.VITE_OPENPC_TOKEN
-
-// Types
-interface ScreenInfo {
-  width: number
-  height: number
-  cursor_x: number
-  cursor_y: number
-}
-
-interface WindowInfo {
-  id: string
-  title: string
-  x: number
-  y: number
-  width: number
-  height: number
-}
-
-// Build headers, attaching the auth token when configured
-function authHeaders(extra?: Record<string, string>): Record<string, string> {
-  const headers: Record<string, string> = { ...(extra || {}) }
-  if (AUTH_TOKEN) headers['X-OpenPC-Token'] = AUTH_TOKEN
-  return headers
-}
-
-// API functions
-const api = {
-  async get(endpoint: string) {
-    const response = await fetch(`${API_BASE}${endpoint}`, { headers: authHeaders() })
-    if (!response.ok) throw new Error(`API error: ${response.status}`)
-    return response.json()
-  },
-
-  async post(endpoint: string, data?: Record<string, unknown>) {
-    const response = await fetch(`${API_BASE}${endpoint}`, {
-      method: 'POST',
-      headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: data ? JSON.stringify(data) : undefined
-    })
-    if (!response.ok) throw new Error(`API error: ${response.status}`)
-    return response.json()
-  }
-}
+const API_BASE = '/api'
 
 function App() {
   // State
@@ -57,6 +15,7 @@ function App() {
   const [commandInput, setCommandInput] = useState('')
   const [commandOutput, setCommandOutput] = useState<string[]>([])
   const [logs, setLogs] = useState<string[]>([])
+  const [caps, setCaps] = useState<Capabilities | null>(null)
 
   // MJPEG stream URL - browser handles streaming automatically
   // Append auth token as query param when configured (img tags can't set headers)
@@ -86,7 +45,7 @@ function App() {
   // Fetch screen info
   const fetchScreenInfo = useCallback(async () => {
     try {
-      const info = await api.get('/screen')
+      const info = await openpc.screen()
       setScreenInfo(info)
       setConnected(true)
     } catch (err) {
@@ -98,26 +57,42 @@ function App() {
   // Fetch windows
   const fetchWindows = useCallback(async () => {
     try {
-      const result = await api.get('/windows')
-      setWindows(result.windows || [])
+      const wins = await openpc.windows()
+      setWindows(wins)
     } catch (err) {
       addLog(`Windows error: ${err}`)
     }
   }, [addLog])
 
-  // Initial load
+  // Initial load: screen + windows + server capabilities
   useEffect(() => {
     fetchScreenInfo()
     fetchWindows()
+    openpc
+      .capabilities()
+      .then(setCaps)
+      .catch(() => setCaps(null))
   }, [fetchScreenInfo, fetchWindows])
+
+  // Live window list: poll the REST source of truth on an interval (SmolVM's
+  // "REST is the source of truth" pattern). The dashboard stays in sync
+  // without a manual refresh.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      fetchWindows()
+    }, 5000)
+    return () => window.clearInterval(id)
+  }, [fetchWindows])
 
   // Execute command
   const executeCommand = async (command: string) => {
     setCommandOutput(prev => [...prev, `$ ${command}`])
     try {
-      const result = await api.post('/apps/run', { command, timeout: 30 })
-      if (result.stdout) setCommandOutput(prev => [...prev, result.stdout])
-      if (result.stderr) setCommandOutput(prev => [...prev, result.stderr])
+      const result = await openpc.runCommand(command, 30)
+      const out = result.stdout
+      const err = result.stderr
+      if (out) setCommandOutput(prev => [...prev, out])
+      if (err) setCommandOutput(prev => [...prev, err])
       addLog(`Command: ${command}`)
     } catch (err) {
       setCommandOutput(prev => [...prev, `Error: ${err}`])
@@ -140,7 +115,7 @@ function App() {
     const y = Math.round((e.clientY - rect.top) * scaleY)
 
     try {
-      await api.post('/mouse/click', { x, y, button: 'left', clicks: 1 })
+      await openpc.mouseClick(x, y, 'left', 1)
       addLog(`Clicked at (${x}, ${y})`)
     } catch (err) {
       addLog(`Click error: ${err}`)
@@ -166,15 +141,15 @@ function App() {
 
   // Quick actions
   const quickActions = [
-    { label: '↖', action: () => api.post('/keyboard/hotkey', { keys: ['Alt', 'F9'] }), title: 'Minimize' },
-    { label: '↗', action: () => api.post('/keyboard/hotkey', { keys: ['Alt', 'F10'] }), title: 'Maximize' },
-    { label: '✕', action: () => api.post('/keyboard/hotkey', { keys: ['Alt', 'F4'] }), title: 'Close' },
+    { label: '↖', action: () => openpc.keyboardHotkey(['Alt', 'F9']), title: 'Minimize' },
+    { label: '↗', action: () => openpc.keyboardHotkey(['Alt', 'F10']), title: 'Maximize' },
+    { label: '✕', action: () => openpc.keyboardHotkey(['Alt', 'F4']), title: 'Close' },
   ]
 
   const appActions = [
-    { label: 'Chrome', action: () => api.post('/apps/launch', { application: 'google-chrome' }) },
-    { label: 'Terminal', action: () => api.post('/apps/launch', { application: 'xfce4-terminal' }) },
-    { label: 'Files', action: () => api.post('/apps/launch', { application: 'thunar' }) },
+    { label: 'Chrome', action: () => openpc.launchApp('google-chrome') },
+    { label: 'Terminal', action: () => openpc.launchApp('xfce4-terminal') },
+    { label: 'Files', action: () => openpc.launchApp('thunar') },
   ]
 
   return (
@@ -187,6 +162,11 @@ function App() {
         <div className="status">
           <div className={`status-dot ${connected ? 'connected' : ''}`} />
           <span>{connected ? 'Connected' : 'Disconnected'}</span>
+          {caps && (
+            <span style={{ marginLeft: '12px', color: 'var(--text-secondary)', fontSize: '12px' }}>
+              server v{caps.version} · {caps.ws_commands.length} tools
+            </span>
+          )}
           {screenInfo && (
             <span style={{ marginLeft: '12px', color: 'var(--text-secondary)' }}>
               {screenInfo.width} × {screenInfo.height}
@@ -227,7 +207,7 @@ function App() {
               placeholder="Open URL..."
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && e.currentTarget.value) {
-                  api.post('/apps/open-url', { url: e.currentTarget.value })
+                  openpc.openUrl(e.currentTarget.value)
                   e.currentTarget.value = ''
                 }
               }}
@@ -240,7 +220,7 @@ function App() {
               placeholder="Type text..."
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && e.currentTarget.value) {
-                  api.post('/keyboard/type', { text: e.currentTarget.value })
+                  openpc.keyboardType(e.currentTarget.value)
                   e.currentTarget.value = ''
                 }
               }}
@@ -268,13 +248,13 @@ function App() {
             ))}
           </div>
           <div className="quick-actions" style={{ marginTop: '8px' }}>
-            <button className="btn" onClick={() => api.post('/keyboard/hotkey', { keys: ['ctrl', 'c'] })}>
+            <button className="btn" onClick={() => openpc.keyboardHotkey(['ctrl', 'c'])}>
               Copy
             </button>
-            <button className="btn" onClick={() => api.post('/keyboard/hotkey', { keys: ['ctrl', 'v'] })}>
+            <button className="btn" onClick={() => openpc.keyboardHotkey(['ctrl', 'v'])}>
               Paste
             </button>
-            <button className="btn" onClick={() => api.post('/keyboard/press', { key: 'escape' })}>
+            <button className="btn" onClick={() => openpc.keyboardPress('escape')}>
               Esc
             </button>
           </div>
@@ -288,13 +268,13 @@ function App() {
             <span>Y: {mousePos.y}</span>
           </div>
           <div className="quick-actions">
-            <button className="btn" onClick={() => api.post('/mouse/click', { x: mousePos.x, y: mousePos.y, button: 'left' })}>
+            <button className="btn" onClick={() => openpc.mouseClick(mousePos.x, mousePos.y, 'left')}>
               Left
             </button>
-            <button className="btn" onClick={() => api.post('/mouse/click', { x: mousePos.x, y: mousePos.y, button: 'right' })}>
+            <button className="btn" onClick={() => openpc.mouseClick(mousePos.x, mousePos.y, 'right')}>
               Right
             </button>
-            <button className="btn" onClick={() => api.post('/mouse/double-click', { x: mousePos.x, y: mousePos.y })}>
+            <button className="btn" onClick={() => openpc.mouseDoubleClick(mousePos.x, mousePos.y)}>
               Double
             </button>
           </div>
@@ -311,7 +291,7 @@ function App() {
                 <div
                   key={win.id}
                   className="window-item"
-                  onClick={() => api.post('/windows/focus', { window_id: win.id })}
+                  onClick={() => openpc.focusWindow(win.id)}
                 >
                   <span>{win.title || 'Untitled'}</span>
                   <span className="window-id">{win.id.slice(0, 8)}</span>
