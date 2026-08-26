@@ -18,7 +18,8 @@ from dataclasses import asdict
 from typing import Any
 
 import uvicorn
-from desktop_manager import DesktopManager, MouseButton
+from backends import DesktopBackend, resolve_backend
+from desktop_manager import MouseButton
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -54,8 +55,8 @@ REST_AUTH_TOKEN = os.environ.get('REST_AUTH_TOKEN', '')
 AUTH_REQUIRED = os.environ.get('AUTH_REQUIRED', 'true').lower() == 'true'
 APP_VERSION = os.environ.get('APP_VERSION', '0.1.0')
 
-# Global desktop manager
-desktop_manager: DesktopManager | None = None
+# Global desktop backend (a DesktopBackend adapter; DesktopManager by default)
+desktop_manager: DesktopBackend | None = None
 
 
 # REST API token authentication
@@ -70,6 +71,16 @@ def require_token(request: Request):
             token = auth[len('Bearer '):].strip()
     if not token or not secrets.compare_digest(token, REST_AUTH_TOKEN):
         raise HTTPException(status_code=401, detail='Invalid or missing API token (X-OpenPC-Token)')
+
+
+def _actionable_error(message: str, status: int = 500) -> HTTPException:
+    """Build an HTTPException carrying a single actionable sentence (SmolVM style).
+
+    SmolVM's rule: every user-facing error is one short sentence that names the
+    problem and the exact recovery. Raw exception strings are logged server-side
+    but never leaked to the client.
+    """
+    return HTTPException(status_code=status, detail=message)
 
 
 # ============== Pydantic Models ==============
@@ -201,15 +212,16 @@ connection_manager = ConnectionManager()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize desktop manager on startup"""
+    """Initialize the desktop backend on startup."""
     global desktop_manager
     logger.info("Initializing Open-PC Agent Server...")
 
-    # Wait for X11 display to be ready
+    # Wait for the X11 display to be ready before resolving the backend. We
+    # re-resolve on each attempt so the probe can succeed once the display is up.
     max_attempts = 30
     for attempt in range(max_attempts):
         try:
-            desktop_manager = DesktopManager()
+            desktop_manager = resolve_backend()
             screen_info = desktop_manager.get_screen_info()
             logger.info(f"Display ready. Screen: {screen_info.width}x{screen_info.height}")
             break
@@ -218,7 +230,7 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(1)
     else:
         logger.error("Failed to initialize display after 30 seconds")
-        desktop_manager = DesktopManager()  # Try anyway
+        desktop_manager = resolve_backend()  # Try anyway
 
     logger.info(f"Open-PC Agent Server ready on {AGENT_HOST}:{AGENT_PORT}")
     yield
@@ -300,6 +312,7 @@ def health():
         screen_info = desktop_manager.get_screen_info()
         return {
             "status": "healthy",
+            "backend": getattr(desktop_manager, "backend", "local"),
             "display": f"{screen_info.width}x{screen_info.height}",
             "cursor": f"{screen_info.cursor_x},{screen_info.cursor_y}"
         }
@@ -308,6 +321,54 @@ def health():
             status_code=503,
             content={"status": "unhealthy", "error": str(e)}
         )
+
+
+# Commands supported over the WebSocket command channel. Kept in one place so the
+# /capabilities endpoint and the WS dispatcher stay in sync.
+WS_COMMANDS = [
+    "screenshot", "click", "double_click", "right_click", "move_mouse", "drag",
+    "scroll", "type", "press", "hotkey", "key_down", "key_up", "list_windows",
+    "focus_window", "close_window", "maximize_window", "minimize_window",
+    "launch", "open_url", "run_command", "ocr", "screen_info", "wait",
+]
+
+
+@app.get("/capabilities")
+def capabilities():
+    """Advertise available tools, transport endpoints, and limits to agents.
+
+    Mirrors SmolVM's guest-agent ``GET /capabilities``: an agent (or SDK) can
+    probe this once to learn what it can drive and the enforced limits, instead
+    of guessing from the OpenAPI spec.
+    """
+    return {
+        "name": "open-pc",
+        "version": APP_VERSION,
+        "backend": getattr(desktop_manager, "backend", "local"),
+        "transports": ["rest", "websocket", "mjpeg-stream"],
+        "ws_commands": WS_COMMANDS,
+        "rest_endpoints": [
+            "/screenshot", "/screenshot/base64", "/screenshot/region",
+            "/screen", "/mouse/move", "/mouse/click", "/mouse/double-click",
+            "/mouse/right-click", "/mouse/scroll", "/mouse/drag", "/mouse/position",
+            "/mouse/locate", "/mouse/locate-base64", "/keyboard/type", "/keyboard/press",
+            "/keyboard/hotkey", "/keyboard/down", "/keyboard/up", "/windows",
+            "/windows/active", "/windows/focus", "/windows/close", "/windows/maximize",
+            "/windows/minimize", "/apps/launch", "/apps/open-url", "/apps/run",
+            "/ocr", "/batch", "/stream", "/capabilities", "/health",
+        ],
+        "limits": {
+            "command_timeout_seconds": {"min": 1, "max": 300, "default": 30},
+            "command_max_length": 5000,
+            "type_max_length": 10000,
+            "rate_limits": {
+                "screenshot": "60/minute",
+                "locate": "30/minute",
+                "batch": "30/minute",
+                "ocr": "5/minute",
+            },
+        },
+    }
 
 
 # Helper to run blocking methods without freezing the event loop
@@ -324,7 +385,10 @@ def get_screenshot(request: Request):
         img_bytes = desktop_manager.take_screenshot()
         return Response(content=img_bytes, media_type="image/png")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.exception("screenshot failed")
+        raise _actionable_error(
+            "Failed to capture the screen. Make sure the X11 display is up (xset q)."
+        ) from e
 
 
 @app.get("/screenshot/base64")
@@ -335,7 +399,10 @@ def get_screenshot_base64(request: Request):
         b64 = desktop_manager.take_screenshot_base64()
         return {"success": True, "image": b64}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.exception("screenshot/base64 failed")
+        raise _actionable_error(
+            "Failed to capture the screen. Make sure the X11 display is up (xset q)."
+        ) from e
 
 
 @app.get("/screenshot/region")
@@ -346,7 +413,10 @@ def get_screenshot_region(request: Request, x: int, y: int, width: int, height: 
         img_bytes = desktop_manager.take_screenshot_region(x, y, width, height)
         return Response(content=img_bytes, media_type="image/png")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.exception("screenshot/region failed")
+        raise _actionable_error(
+            "Failed to capture the screen region. Make sure the X11 display is up (xset q)."
+        ) from e
 
 
 # Image matching API endpoints (template recognition)
@@ -444,7 +514,10 @@ def get_screen_info():
             "cursor_y": info.cursor_y
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.exception("screen info failed")
+        raise _actionable_error(
+            "Failed to read the screen. Make sure the X11 display is up (xset q)."
+        ) from e
 
 
 # ============== Mouse Endpoints ==============
@@ -833,11 +906,20 @@ async def execute_command(command: str, params: dict[str, Any]) -> dict[str, Any
             return {"success": True, "action": "wait"}
 
         else:
-            return {"success": False, "error": f"Unknown command: {command}"}
+            return {
+                "success": False,
+                "error": (
+                    f"Unknown command '{command}'. "
+                    f"GET /capabilities lists the supported commands."
+                ),
+            }
 
     except Exception as e:
         logger.error(f"Command {command} failed: {e}")
-        return {"success": False, "error": str(e)}
+        return {
+            "success": False,
+            "error": f"Command '{command}' failed unexpectedly. Check the server logs and retry.",
+        }
 
 
 # ============== Main Entry Point ==============

@@ -40,7 +40,11 @@ pyautogui.FAILSAFE = False
 # Thread-local mss instance for performance (avoid recreate per frame)
 _thread_local = threading.local()
 
-from sanitization import detect_dangerous_chars
+import contextlib
+import tempfile
+
+from command_runner import run_shell_command
+from io_utils import atomic_write_bytes
 
 
 class MouseButton(Enum):
@@ -71,7 +75,11 @@ class DesktopManager:
     """
     Manages desktop automation for Open-PC.
     Provides mouse, keyboard, screenshot, and window management.
+
+    This is the in-process X11 desktop backend (see backends.DesktopBackend).
     """
+
+    backend = "local"
 
     def __init__(self, display: str = ":1"):
         self.display = display
@@ -444,42 +452,15 @@ class DesktopManager:
             return {"success": False, "error": str(e)}
 
     def run_command(self, command: str, timeout: int = 30) -> dict[str, Any]:
-        """Run shell command with dangerous character sanitization.
+        """Run a shell command safely.
 
-        Blocks characters that enable command chaining or injection:
-        ; | & ` $() ${ } and newlines are stripped to prevent arbitrary code execution.
-        Note: Sanitization is best-effort; for production, prefer allowlisting and running
-        as an unprivileged user inside the container.
+        Sanitizes dangerous shell constructs (delegates to the pure
+        ``detect_dangerous_chars`` helper), then runs the command in its own
+        process group so a timeout kills the whole tree rather than orphaning
+        children. The actual execution lives in ``command_runner.run_shell_command``
+        so it can be unit-tested in CI without a display.
         """
-        if not command or not command.strip():
-            return {"success": False, "error": "Empty command"}
-
-        # Detect dangerous shell constructs (delegates to pure, testable helper)
-        found = detect_dangerous_chars(command)
-
-        if found:
-            blocked = ', '.join(found)
-            return {"success": False, "error": f"Command blocked due to dangerous characters: {blocked}"}
-
-        # At this point command is considered safe enough to run
-        try:
-            result = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=timeout
-            )
-            return {
-                "success": result.returncode == 0,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "return_code": result.returncode
-            }
-        except subprocess.TimeoutExpired:
-            return {"success": False, "error": f"Command timed out after {timeout}s"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        return run_shell_command(command, timeout)
 
     # ============== OCR Methods ==============
 
@@ -544,18 +525,20 @@ class DesktopManager:
         Returns:
             Dict with x, y, width, height, center or error message
         """
-        import tempfile
         try:
             img_data = base64.b64decode(image_b64)
             img = Image.open(io.BytesIO(img_data))
-            # Write to temp file for pyautogui.locateOnScreen
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-                img.save(tmp.name, 'PNG')
-                tmp_path = tmp.name
-            try:
+            buf = io.BytesIO()
+            img.save(buf, 'PNG')
+            # Write the temp reference image atomically and always clean it up,
+            # so a crash never leaks a file and a concurrent reader never sees a
+            # half-written image. (See io_utils.atomic_write_bytes.)
+            with contextlib.ExitStack() as stack:
+                fd, tmp_path = tempfile.mkstemp(suffix='.png')
+                os.close(fd)
+                stack.callback(lambda p=tmp_path: os.unlink(p) if os.path.exists(p) else None)
+                atomic_write_bytes(tmp_path, buf.getvalue())
                 return self.locate_on_screen(tmp_path, confidence)
-            finally:
-                os.unlink(tmp_path)
         except Exception as e:
             return {"success": False, "error": str(e)}
 
