@@ -1,0 +1,24 @@
+# Pre-commit hooks for Open-PC.
+# Mirrors what CI runs (ruff check) plus basic hygiene hooks, so the same
+# lint gate runs locally before push. Install once with:
+#   pip install pre-commit && pre-commit install
+#
+# Inspired by SmolVM's pre-commit config (ruff + hygiene hooks + markdown/notebook formatting).
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+      - id: check-merge-conflict
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      # Match CI: `ruff check docker mcp-server tests` (autofix locally).
+      - id: ruff
+        args: [--fix]
+        files: ^(docker|mcp-server|tests|openpc\.py$)

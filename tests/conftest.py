@@ -5,9 +5,16 @@ We inject a fake ``pyautogui`` module before any test imports ``agent_server``
 so the screenshot code falls back to ``pyautogui.screenshot()`` (also faked).
 Pillow is used for real (no display required) so PNG encoding works.
 """
+import os
 import sys
 import types
 from pathlib import Path
+
+# Pin terminal/env so any future Rich/Click rendering stays deterministic in
+# assertions (SmolVM pins NO_COLOR/TERM and unsets FORCE_COLOR in its conftest).
+os.environ.setdefault("NO_COLOR", "1")
+os.environ.setdefault("TERM", "dumb")
+os.environ.pop("FORCE_COLOR", None)
 
 DOCKER_DIR = str(Path(__file__).resolve().parent.parent / "docker")
 if DOCKER_DIR not in sys.path:
