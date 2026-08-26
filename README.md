@@ -69,6 +69,28 @@ docker-compose up -d
 
 Default password: `openpc`
 
+### `openpc` CLI
+
+A noun-verb CLI wraps `docker compose` and the REST API so you don't have to
+remember service names, ports, and curl incantations (inspired by SmolVM's
+`smolvm` CLI):
+
+```bash
+python3 openpc.py start          # build + start all containers
+python3 openpc.py status          # show running containers (alias: ps, list)
+python3 openpc.py logs desktop -f # tail the desktop logs
+python3 openpc.py shell           # shell into the desktop container
+python3 openpc.py exec -- ls -la  # run a command in the desktop container
+python3 openpc.py screenshot      # save screen.png from the REST API
+python3 openpc.py open-url https://github.com
+python3 openpc.py run -- echo hello
+python3 openpc.py doctor          # diagnose docker / compose / REST health
+python3 openpc.py stop
+```
+
+Set `OPENPC_TOKEN` (or `REST_AUTH_TOKEN`) in the environment if the REST API is
+token-protected, so `screenshot` / `open-url` / `run` authenticate.
+
 ---
 
 ## ✨ Features
@@ -232,6 +254,13 @@ curl -X POST http://localhost:8090/apps/open-url \
 > ```
 >
 > When unset, the REST API remains open (backwards compatible).
+>
+> **Capability discovery:** `GET /capabilities` advertises the available tools,
+> transports, and enforced limits (rate limits, command timeout bounds) so an
+> agent or SDK can probe what it can drive without guessing. The full machine-
+> readable contract is also available at the standard FastAPI endpoint
+> `GET /openapi.json` (and committed as `dashboard/openapi.json`, which the
+> dashboard's TypeScript SDK is generated from).
 
 ---
 
@@ -266,7 +295,7 @@ Open-PC ships with a test suite, linting, and CI so changes stay safe.
 ```bash
 # Lint
 pip install ruff
-ruff check docker mcp-server tests
+ruff check openpc.py docker mcp-server tests
 
 # Run the test suite (no display required — pyautogui is mocked)
 pip install pytest httpx fastapi uvicorn pydantic slowapi pillow

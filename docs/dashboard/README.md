@@ -61,6 +61,10 @@ The **Web Dashboard** provides a real-time, browser-based control panel for moni
 | `dashboard/package.json` | NPM dependencies |
 | `dashboard/vite.config.ts` | Vite bundler configuration |
 | `dashboard/src/App.tsx` | Main React component |
+| `dashboard/src/api/openpc.ts` | Typed API wrapper over the generated SDK |
+| `dashboard/src/api/client/` | Generated TypeScript client (from OpenAPI) |
+| `dashboard/openapi.json` | Committed OpenAPI contract (server is source of truth) |
+| `dashboard/openapi-ts.config.ts` | `@hey-api/openapi-ts` generator config |
 | `dashboard/src/main.tsx` | Application entry point |
 | `dashboard/src/index.css` | Dark theme styling |
 | `dashboard/index.html` | HTML template |
@@ -93,7 +97,10 @@ The **Web Dashboard** provides a real-time, browser-based control panel for moni
 
 ## 🔌 API Integration
 
-The dashboard communicates with the Desktop Container through Nginx reverse proxy:
+The dashboard talks to the Desktop Container through Nginx's `/api` reverse
+proxy. Calls go through a **typed TypeScript SDK** (`src/api/openpc.ts`) that
+wraps a client generated from the committed OpenAPI contract (`openapi.json`),
+so the dashboard gets typed request bodies instead of hand-rolled `fetch()`.
 
 ### Endpoints Used
 
@@ -102,6 +109,7 @@ The dashboard communicates with the Desktop Container through Nginx reverse prox
 | `/api/stream` | GET | MJPEG video stream |
 | `/api/screen` | GET | Screen dimensions |
 | `/api/windows` | GET | List all windows |
+| `/api/capabilities` | GET | Advertise tools/limits to agents |
 | `/api/mouse/click` | POST | Send mouse click |
 | `/api/keyboard/type` | POST | Type text |
 | `/api/keyboard/hotkey` | POST | Press key combination |
@@ -109,6 +117,19 @@ The dashboard communicates with the Desktop Container through Nginx reverse prox
 | `/api/apps/open-url` | POST | Open URL |
 | `/api/apps/run` | POST | Run shell command |
 | `/api/windows/focus` | POST | Focus window |
+
+### TypeScript SDK & OpenAPI Contract
+
+The FastAPI agent server is the single source of truth. `scripts/dump_openapi.py`
+dumps its schema to `dashboard/openapi.json`; `@hey-api/openapi-ts` generates a
+client from that spec into `dashboard/src/api/client/`; `src/api/openpc.ts`
+wraps it with an ergonomic, typed surface. CI (`.github/workflows/openapi.yml`)
+fails if the committed spec drifts from the live server.
+
+```bash
+# Re-dump the spec AND regenerate the client in one go
+cd dashboard && npm run sync
+```
 
 ## ⚙️ Configuration
 
@@ -231,6 +252,15 @@ npm install
 npm run dev
 ```
 
+### Regenerate the typed SDK
+
+After the agent server's REST API changes, re-sync the contract and client:
+
+```bash
+cd dashboard
+npm run sync   # re-dumps openapi.json and regenerates src/api/client
+```
+
 ### Build for Production
 
 ```bash
@@ -250,6 +280,9 @@ dashboard/
 └── src/
     ├── main.tsx        # Entry point
     ├── App.tsx         # Main component
+    ├── api/
+    │   ├── openpc.ts   # Typed API wrapper
+    │   └── client/     # Generated SDK (do not edit)
     └── index.css       # Styles
 ```
 
@@ -267,9 +300,9 @@ const streamUrl = `${API_BASE}/stream?fps=30&quality=80`
 In `App.tsx`:
 ```tsx
 const appActions = [
-  { label: 'Chrome', action: () => api.post('/apps/launch', { application: 'google-chrome' }) },
-  { label: 'Terminal', action: () => api.post('/apps/launch', { application: 'xfce4-terminal' }) },
-  { label: 'Files', action: () => api.post('/apps/launch', { application: 'thunar' }) },
+  { label: 'Chrome', action: () => openpc.launchApp('google-chrome') },
+  { label: 'Terminal', action: () => openpc.launchApp('xfce4-terminal') },
+  { label: 'Files', action: () => openpc.launchApp('thunar') },
   // Add your custom actions here
 ]
 ```
