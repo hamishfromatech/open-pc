@@ -15,6 +15,8 @@ from typing import Any
 
 import aiohttp
 from fastmcp import FastMCP
+from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware import Middleware
 
 # ============== Configuration ==============
 
@@ -96,7 +98,7 @@ async def app_lifespan(server):
     await client.close()
 
 
-# Use SSE transport for better compatibility with MCP clients
+# Use streamable-http transport (modern MCP default, more reliable than SSE)
 mcp = FastMCP("Open-PC Desktop Control", lifespan=app_lifespan)
 
 
@@ -550,13 +552,22 @@ async def wait_seconds(seconds: float) -> str:
     Useful for waiting for applications to load or animations to complete.
 
     Args:
-        seconds: Number of seconds to wait
+        seconds: Number of seconds to wait (max 30 seconds)
 
     Returns:
         Confirmation message
     """
-    await asyncio.sleep(seconds)
-    return f"Waited {seconds} seconds"
+    # Cap wait time to prevent client timeouts
+    max_wait = 30.0
+    actual_wait = min(max(0.1, seconds), max_wait)
+
+    if seconds > max_wait:
+        # For long waits, return immediately and note the cap
+        await asyncio.sleep(actual_wait)
+        return f"Waited {actual_wait} seconds (requested {seconds} seconds was capped to max {max_wait}s)"
+
+    await asyncio.sleep(actual_wait)
+    return f"Waited {actual_wait} seconds"
 
 
 # ============== Resource for Context ==============
@@ -582,7 +593,22 @@ async def get_desktop_status() -> str:
 if __name__ == "__main__":
     print("Starting Open-PC MCP Server...")
     print(f"Connecting to Open-PC Agent at: {BASE_URL}")
-    print("MCP Server running on: http://0.0.0.0:8000")
+    print(f"MCP Server running on: http://0.0.0.0:8000/mcp")
 
-    # Run with SSE transport, binding to 0.0.0.0 for Docker
-    mcp.run(transport="sse", host="0.0.0.0", port=8000)
+    # Run with streamable-http transport, binding to 0.0.0.0 for Docker
+    mcp.run(
+        transport="streamable-http",
+        host="0.0.0.0",
+        port=8000,
+        stateless_http=True,
+        allowed_origins=["*"],
+        middleware=[
+            Middleware(
+                CORSMiddleware,
+                allow_origins=["*"],
+                allow_methods=["*"],
+                allow_headers=["*"],
+                allow_credentials=True,
+            )
+        ],
+    )
