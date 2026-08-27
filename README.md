@@ -53,8 +53,29 @@ Get Open-PC running in under 2 minutes:
 git clone https://github.com/hamishfromatech/open-pc.git
 cd open-pc
 cp .env.example .env
-docker-compose up -d
+docker compose up -d
 ```
+
+**That's it.** Open your browser to `http://localhost:8092` and watch AI take control.
+
+### With GPU Support (NVIDIA)
+
+For AI workloads that need GPU acceleration (PyTorch, Ollama, etc.):
+
+```bash
+# 1. Install the NVIDIA Container Toolkit on your host:
+#    https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+
+# 2. Set the flag in .env
+echo "ENABLE_GPU=true" >> .env
+
+# 3. Build with GPU support (adds CUDA + PyTorch, ~10 min extra)
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+```
+
+This adds NVIDIA CUDA 12.6, cuDNN, PyTorch (CUDA 12.6), and common ML libraries
+(transformers, accelerate, huggingface_hub) to the container. The GPU device is
+passed through at runtime via the NVIDIA Container Toolkit.
 
 **That's it.** Open your browser to `http://localhost:8092` and watch AI take control.
 
@@ -173,7 +194,7 @@ Develop and test robotic process automation workflows in a safe sandbox before d
 │                              │                                       │
 │                              ▼                                       │
 │  ┌────────────────────────────────────────────────────────────────┐ │
-│  │         📦 Docker Container (Ubuntu 22.04)                     │ │
+│  │         📦 Docker Container (Ubuntu 24.04)                     │ │
 │  │  ┌──────────────────────────────────────────────────────────┐  │ │
 │  │  │  🖥️ TigerVNC Server                                      │  │ │
 │  │  │     • Virtual display 1920x1080                          │  │ │
@@ -203,8 +224,8 @@ Open-PC includes a native **FastMCP server** (v3.x) for seamless integration wit
 {
   "mcpServers": {
     "open-pc": {
-      "type": "sse",
-      "url": "http://localhost:8091/sse"
+      "type": "streamable-http",
+      "url": "http://localhost:8091/mcp"
     }
   }
 }
@@ -274,6 +295,7 @@ curl -X POST http://localhost:8090/apps/open-url \
 | `VNC_RESOLUTION` | `1920x1080` | Screen resolution |
 | `AUTH_REQUIRED` | `true` | Require WebSocket authentication |
 | `REST_AUTH_TOKEN` | _(empty)_ | Optional token to protect REST endpoints (sent via `X-OpenPC-Token` header). Empty = open |
+| `ENABLE_GPU` | `false` | Set to `true` to install CUDA + PyTorch in the image (use with `docker-compose.gpu.yml`)
 
 ### Ports
 
@@ -344,14 +366,15 @@ Open-PC is designed as a **sandboxed environment**:
 
 | Component | Technology |
 |-----------|------------|
-| Base OS | Ubuntu 22.04 LTS |
+| Base OS | Ubuntu 24.04 LTS |
 | Desktop | XFCE4 |
 | VNC | TigerVNC + noVNC |
 | Backend | Python 3 + FastAPI + Uvicorn |
 | Automation | PyAutoGUI, MSS, python-xlib |
-| MCP | FastMCP v3.x (SSE transport) |
+| MCP | FastMCP v3.x (streamable-http transport) |
 | Frontend | React 18 + Vite + TypeScript |
 | Browser | Google Chrome |
+| GPU (opt-in) | NVIDIA CUDA 12.6 + PyTorch |
 
 ---
 
