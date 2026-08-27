@@ -137,7 +137,8 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     pydantic==2.5.0 \
     opencv-python-headless==4.9.0.80 \
     numpy==1.26.0 \
-    pytesseract==0.3.10
+    pytesseract==0.3.10 \
+    slowapi==0.1.9
 
 # ── GPU / CUDA layer (opt-in) ─────────────────────────────────────
 # Only installed when ENABLE_GPU=true. Adds NVIDIA CUDA runtime,
@@ -191,7 +192,10 @@ RUN mkdir -p /home/desktop/.vnc \
 
 # Copy application files
 COPY agent_server.py /opt/openpc/agent_server.py
+COPY backends.py /opt/openpc/backends.py
+COPY command_runner.py /opt/openpc/command_runner.py
 COPY desktop_manager.py /opt/openpc/desktop_manager.py
+COPY io_utils.py /opt/openpc/io_utils.py
 COPY sanitization.py /opt/openpc/sanitization.py
 COPY startup.sh /opt/openpc/startup.sh
 COPY xstartup /opt/openpc/xstartup
