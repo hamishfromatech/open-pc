@@ -1,6 +1,20 @@
 # Open-PC: AI-Controlled Linux Desktop
 # A standalone sandbox for AI desktop automation
+#
+# GPU support (opt-in):
+#   Set ENABLE_GPU=true to install NVIDIA CUDA + PyTorch inside the image.
+#   Runtime also requires the NVIDIA Container Toolkit on the host.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+#
+#   Without GPU (default):
+#   docker compose up -d --build
+
+ARG ENABLE_GPU=false
+
 FROM ubuntu:24.04
+
+ARG ENABLE_GPU
 
 # Avoid prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
@@ -124,6 +138,43 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     opencv-python-headless==4.9.0.80 \
     numpy==1.26.0 \
     pytesseract==0.3.10
+
+# ── GPU / CUDA layer (opt-in) ─────────────────────────────────────
+# Only installed when ENABLE_GPU=true. Adds NVIDIA CUDA runtime,
+# cuDNN, PyTorch (CUDA), and common ML libs so the container can
+# run GPU-accelerated workloads (inference, training, Ollama, etc.).
+#
+# Build with: --build-arg ENABLE_GPU=true
+# Runtime:    needs NVIDIA Container Toolkit + docker-compose.gpu.yml
+RUN if [ "$ENABLE_GPU" = "true" ]; then \
+        curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/31986713.keylist \
+            | gpg --dearmor -o /usr/share/keyrings/nvidia-cuda.gpg \
+        && echo "deb [signed-by=/usr/share/keyrings/nvidia-cuda.gpg] https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64 /" \
+            > /etc/apt/sources.list.d/nvidia-cuda.list \
+        && apt-get update \
+        && apt-get install -y --no-install-recommends \
+            cuda-cudart-12-6 \
+            cuda-libraries-12-6 \
+            cuda-nvcc-12-6 \
+            libcublas-12-6 \
+            libcudnn9-cuda-12 \
+        && apt-get clean \
+        && rm -rf /var/lib/apt/lists/* \
+        && pip3 install --no-cache-dir --break-system-packages \
+            torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126 \
+        && pip3 install --no-cache-dir --break-system-packages \
+            transformers>=4.40.0 \
+            accelerate>=0.30.0 \
+            sentencepiece \
+            safetensors \
+            huggingface_hub \
+        ; fi
+
+# Set GPU environment variables (harmless when no GPU; used by NVIDIA runtime)
+ENV NVIDIA_VISIBLE_DEVICES=${ENABLE_GPU:+all}
+ENV NVIDIA_DRIVER_CAPABILITIES=${ENABLE_GPU:+compute,utility}
+ENV PATH=${ENABLE_GPU:+/usr/local/cuda-12.6.3/bin:}${PATH}
+ENV LD_LIBRARY_PATH=${ENABLE_GPU:+/usr/local/cuda-12.6.3/lib64:}${LD_LIBRARY_PATH}
 
 # Create desktop user
 RUN useradd -m -s /bin/bash desktop && \

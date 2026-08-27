@@ -2,6 +2,11 @@ version: '3.8'
 
 # Open-PC: AI-Controlled Linux Desktop
 # A standalone sandbox for AI desktop automation
+#
+# GPU support:
+#   1. Install NVIDIA Container Toolkit on the host
+#   2. Set ENABLE_GPU=true in .env
+#   3. docker compose up -d --build
 
 services:
   # Linux Desktop with VNC and Agent Server
@@ -9,6 +14,8 @@ services:
     build:
       context: ./docker
       dockerfile: Dockerfile
+      args:
+        ENABLE_GPU: ${ENABLE_GPU:-false}
     container_name: open-pc-desktop
     hostname: open-pc
     environment:
