@@ -434,8 +434,36 @@ class DesktopManager:
     def launch_application(self, app_name: str) -> dict[str, Any]:
         """Launch an application"""
         try:
-            subprocess.Popen([app_name], start_new_session=True)
-            time.sleep(1)  # Wait for app to start
+            # Ensure X11 environment is passed to the subprocess
+            env = os.environ.copy()
+            env['DISPLAY'] = self.display
+            # Ensure Xauthority is set for X11 access
+            if 'XAUTHORITY' not in env:
+                xauthority = os.path.expanduser('~/.Xauthority')
+                if os.path.exists(xauthority):
+                    env['XAUTHORITY'] = xauthority
+                elif os.path.exists('/home/desktop/.Xauthority'):
+                    env['XAUTHORITY'] = '/home/desktop/.Xauthority'
+
+            subprocess.Popen(
+                [app_name],
+                env=env,
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+
+            # Wait for window to appear
+            time.sleep(2)
+
+            # Try to raise the window using xdotool
+            # Find the newest window and raise it
+            subprocess.run(
+                ['xdotool', 'search', '--onlyvisible', '--class', app_name, 'windowraise', '%1'],
+                capture_output=True,
+                timeout=5
+            )
+
             return {"success": True, "action": "launch", "application": app_name}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -443,10 +471,85 @@ class DesktopManager:
     def open_url(self, url: str, browser: str = "google-chrome") -> dict[str, Any]:
         """Open URL in browser"""
         try:
+            # Ensure X11 environment is passed to the subprocess
+            env = os.environ.copy()
+            env['DISPLAY'] = self.display
+            if 'XAUTHORITY' not in env:
+                xauthority = os.path.expanduser('~/.Xauthority')
+                if os.path.exists(xauthority):
+                    env['XAUTHORITY'] = xauthority
+                elif os.path.exists('/home/desktop/.Xauthority'):
+                    env['XAUTHORITY'] = '/home/desktop/.Xauthority'
+
+            # Chrome flags to ensure window is visible and focused
+            chrome_flags = [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-gpu',
+                '--disable-software-rasterizer',
+                '--start-maximized',
+                '--disable-extensions',
+                '--no-first-run',
+                '--disable-background-networking',
+                '--disable-default-apps',
+                '--disable-translate',
+                '--disable-sync',
+                '--disable-dev-shm-usage',
+                '--new-window',           # Force new window
+                '--disable-background-mode',  # Prevent background mode
+                '--disable-minimized',    # Prevent minimized state
+                '--active-on-launch',     # Make active on launch
+            ]
+
             subprocess.Popen(
-                [browser, '--no-sandbox', '--disable-setuid-sandbox', url],
-                start_new_session=True
+                [browser] + chrome_flags + [url],
+                env=env,
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
             )
+
+            # Wait for window to appear
+            time.sleep(3)
+
+            # Force activate Chrome window using xdotool
+            # First find the Chrome window
+            find_result = subprocess.run(
+                ['xdotool', 'search', '--onlyvisible', '--class', 'chrome'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            if find_result.returncode == 0 and find_result.stdout.strip():
+                # Get the last (newest) window ID
+                window_ids = find_result.stdout.strip().split('\n')
+                if window_ids:
+                    window_id = window_ids[-1]
+                    # Activate, raise, and focus the window
+                    subprocess.run(
+                        ['xdotool', 'windowactivate', window_id],
+                        capture_output=True,
+                        timeout=5
+                    )
+                    subprocess.run(
+                        ['xdotool', 'windowraise', window_id],
+                        capture_output=True,
+                        timeout=5
+                    )
+                    subprocess.run(
+                        ['xdotool', 'windowfocus', window_id],
+                        capture_output=True,
+                        timeout=5
+                    )
+
+            # Also use wmctrl as fallback
+            subprocess.run(
+                ['wmctrl', '-a', 'Chrome'],
+                capture_output=True,
+                timeout=5
+            )
+
             return {"success": True, "action": "open_url", "url": url}
         except Exception as e:
             return {"success": False, "error": str(e)}
