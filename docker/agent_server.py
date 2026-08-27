@@ -405,6 +405,24 @@ def get_screenshot_base64(request: Request):
         ) from e
 
 
+@app.get("/screenshot/base64/compressed")
+@limiter.limit("60/minute")
+def get_screenshot_base64_compressed(request: Request, max_width: int = 640, quality: int = 55):
+    """Get a scaled-down JPEG screenshot as base64 — optimised for LLM context windows.
+
+    A 1920x1080 PNG (~1.1M chars of base64) becomes a ~640x360 JPEG (~40K chars).
+    LLMs internally tile to 512x512, so 640px preserves all readable detail.
+    """
+    try:
+        b64 = desktop_manager.take_screenshot_scaled_base64(max_width=max_width, quality=quality)
+        return {"success": True, "image": b64, "max_width": max_width, "quality": quality}
+    except Exception as e:
+        logger.exception("screenshot/base64/compressed failed")
+        raise _actionable_error(
+            "Failed to capture the screen. Make sure the X11 display is up (xset q)."
+        ) from e
+
+
 @app.get("/screenshot/region")
 @limiter.limit("60/minute")
 def get_screenshot_region(request: Request, x: int, y: int, width: int, height: int):

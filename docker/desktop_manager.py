@@ -156,9 +156,36 @@ class DesktopManager:
         img.save(buffer, format='JPEG', quality=quality)
         return buffer.getvalue()
 
+    def take_screenshot_scaled(self, max_width: int = 640, quality: int = 55, format: str = 'JPEG') -> bytes:
+        """Take a screenshot, scale down if wider than max_width, return compressed bytes.
+
+        Ideal for LLM context windows — a 1920x1080 screenshot becomes ~640x360 JPEG
+        which is ~28KB of base64 instead of ~830KB. LLMs internally downscale to
+        512x512 tiles anyway, so 640px preserves all readable detail.
+        """
+        img = self._grab()
+        if img is None:
+            logger.warning("mss failed for scaled screenshot, falling back to pyautogui")
+            img = pyautogui.screenshot()
+        if img.width > max_width:
+            ratio = max_width / img.width
+            new_height = int(img.height * ratio)
+            img = img.resize((max_width, new_height), Image.LANCZOS)
+        buffer = io.BytesIO()
+        fmt = format.upper()
+        if fmt == 'JPEG':
+            img = img.convert('RGB')  # JPEG needs RGB
+        img.save(buffer, format=fmt, quality=quality if fmt == 'JPEG' else None, optimize=True)
+        return buffer.getvalue()
+
     def take_screenshot_base64(self) -> str:
         """Take a screenshot and return as base64 string"""
         img_bytes = self.take_screenshot()
+        return base64.b64encode(img_bytes).decode('utf-8')
+
+    def take_screenshot_scaled_base64(self, max_width: int = 640, quality: int = 55) -> str:
+        """Take a scaled screenshot and return as base64 string (LLM-friendly)."""
+        img_bytes = self.take_screenshot_scaled(max_width=max_width, quality=quality)
         return base64.b64encode(img_bytes).decode('utf-8')
 
     def take_screenshot_region(self, x: int, y: int, width: int, height: int) -> bytes:

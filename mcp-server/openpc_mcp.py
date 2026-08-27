@@ -109,8 +109,29 @@ async def take_screenshot() -> str:
     """
     Take a screenshot of the desktop.
 
-    Returns a base64-encoded PNG image of the current screen.
+    Returns a base64-encoded JPEG image (scaled to max 640px wide, quality 55) of the current screen.
     Use this to see what's currently displayed before taking actions.
+    This is optimised for LLM context windows (~40KB vs ~830KB for full resolution).
+    Use take_screenshot_full() if you need native 1920x1080 PNG resolution.
+
+    Returns:
+        Base64-encoded JPEG image string
+    """
+    await client.connect()
+    result = await client.get('/screenshot/base64/compressed')
+    if result.get('success'):
+        return result.get('image', '')
+    return f"Error: {result.get('error', 'Unknown error')}"
+
+
+@mcp.tool()
+async def take_screenshot_full() -> str:
+    """
+    Take a full-resolution screenshot of the desktop.
+
+    Returns a base64-encoded PNG image at native resolution (1920x1080).
+    WARNING: This returns ~1.1M characters which may overflow LLM context windows.
+    Prefer take_screenshot() for most use cases.
 
     Returns:
         Base64-encoded PNG image string
