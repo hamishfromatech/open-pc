@@ -18,4 +18,4 @@ node_modules/
 dist/
 .next/
 .screenshots
-*.log
+*.log.DS_Store

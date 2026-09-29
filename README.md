@@ -384,6 +384,19 @@ MIT License — Use it, modify it, build on it.
 
 ---
 
+## 🔮 What's Next: A-Coder Cloud
+
+Open-PC is becoming the runtime for **A-Coder Cloud (Sovereign Edition)** — a self-hosted fleet of
+always-on [A-Coder](https://github.com/hamishfromatech/a-coder-cli) agents that keep working whether
+your machine is on or off. When you come back, the work is waiting: a git branch, a full report,
+and the live session, resumable where the cloud left off.
+
+**Git is the sync API, the session is the source of truth, the branch is the deliverable.**
+
+Read the full architecture and roadmap in [docs/cloud/README.md](docs/cloud/README.md).
+
+---
+
 ## 🙏 Acknowledgments
 
 Open-PC stands on the shoulders of giants:

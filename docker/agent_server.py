@@ -28,6 +28,12 @@ from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from starlette.middleware.base import BaseHTTPMiddleware
+from docker.semantic_backend import (  # noqa: E402
+    SemanticBackend,  # type: ignore
+    SemanticBackendUnavailable,  # type: ignore
+    ScreenInfo,  # type: ignore
+)
+from docker.semantic_backend import DEFAULT_DRIVER_URL  # type: ignore
 
 # ============== Rate Limiting ==============
 limiter = Limiter(key_func=get_remote_address)
@@ -347,6 +353,15 @@ def capabilities():
         "backend": getattr(desktop_manager, "backend", "local"),
         "transports": ["rest", "websocket", "mjpeg-stream"],
         "ws_commands": WS_COMMANDS,
+        "semantic": {
+            "enabled": getattr(semantic_backend, "is_available", False),
+            "driver_version": (getattr(semantic_backend.driver, "status", {}) or {}).get(
+                "driver_version"
+            ),
+            "error": (getattr(semantic_backend, "semantic_status", {}) or {}).get(
+                "error"
+            ),
+        },
         "rest_endpoints": [
             "/screenshot", "/screenshot/base64", "/screenshot/region",
             "/screen", "/mouse/move", "/mouse/click", "/mouse/double-click",
@@ -356,6 +371,8 @@ def capabilities():
             "/windows/active", "/windows/focus", "/windows/close", "/windows/maximize",
             "/windows/minimize", "/apps/launch", "/apps/open-url", "/apps/run",
             "/ocr", "/batch", "/stream", "/capabilities", "/health",
+            "/semantic/tree", "/semantic/element/{id}", "/semantic/click",
+            "/semantic/set-value", "/semantic/read", "/semantic/status",
         ],
         "limits": {
             "command_timeout_seconds": {"min": 1, "max": 300, "default": 30},
@@ -725,7 +742,177 @@ async def wait_seconds(seconds: float):
     return {"success": True, "action": "wait", "seconds": seconds}
 
 
-# ============== WebSocket Endpoint ==============
+# ============== Semantic Endpoints ==============
+
+@app.get("/semantic/tree")
+@limiter.limit("30/minute")
+def semantic_tree(request: Request, app: str = "", window: str = ""):
+    """Get a flattened accessibility-tree element tree for an app/window.
+
+    Returns elements with roles, names, positions, actionable verbs, and
+    child element references. Preferred over screenshots when finding UI
+    elements by name or role.
+    """
+    try:
+        tree = semantic_backend.get_element_tree(app=app, window=window)
+        return {
+            "success": True,
+            "app": app,
+            "window": window,
+            "count": len(tree),
+            "elements": tree,
+        }
+    except SemanticBackendUnavailable as exc:
+        raise _actionable_error(
+            "Semantic control is not available. Install cua-driver or start it on "
+            "to install cua-driver or start it on the host, then retry."
+        )
+
+
+@app.get("/semantic/tree")
+@limiter.limit("30/minute")
+def semantic_tree(request: Request, app: str = "", window: str = ""):
+    """Get a flattened accessibility-tree element tree for an app/window.
+
+    Returns elements with roles, names, positions, actionable verbs, and
+    child element references. Preferred over screenshots when finding UI
+    elements by name or role.
+    """
+    try:
+        tree = semantic_backend.get_element_tree(app=app, window=window)
+        return {
+            "success": True,
+            "app": app,
+            "window": window,
+            "count": len(tree),
+            "elements": tree,
+        }
+    except SemanticBackendUnavailable as exc:
+        raise _actionable_error(
+            "Semantic control is not available. Install cua-driver or start it on "
+            "to install cua-driver or start it on the host, then retry."
+        )
+
+
+@app.get("/semantic/element/{element_id}")
+@limiter.limit("10/minute")
+def semantic_element(request: Request, element_id: str):
+    """Get detailed info for a single UI element."""
+    try:
+        detail = semantic_backend.get_element_detail(element_id)
+        return {
+            "success": True,
+            "element_id": element_id,
+            "app": detail.app,
+            "role": detail.role,
+            "name": detail.name,
+            "bbox": detail.bbox,
+            "actionable": detail.actionable,
+            "children_count": detail.children_count,
+            "description": detail.description,
+        }
+    except SemanticBackendUnavailable as exc:
+        raise _actionable_error(
+            "Could not retrieve element details for '{}'. Check that cua-driver is "
+            "installed and the desktop is running."
+            .format(element_id)
+        ) from exc
+
+
+@app.post("/semantic/click")
+@limiter.limit("10/minute")
+def semantic_click(request: Request):
+    """Invoke the default action of a UI element via the driver."""
+    try:
+        element_id = request.json()["element_id"]
+        result = semantic_backend.click(element_id)
+        return {
+            "success": result.ok,
+            "element_id": element_id,
+            "element_name": result.element_name,
+            "detail": result.detail,
+            "duration_ms": result.duration_ms,
+        }
+    except SemanticBackendUnavailable as exc:
+        raise _actionable_error(
+            "Could not execute a click on element '{}'. Check that cua-driver is "
+            "installed and the desktop is running."
+            .format(element_id)
+        ) from exc
+    except KeyError as exc:
+        raise _actionable_error(
+            "Invalid request for semantic/click: missing 'element_id'."
+        ) from exc
+
+
+@app.post("/semantic/set-value")
+@limiter.limit("10/minute")
+def semantic_set_value(request: Request):
+    """Set a text value on an editable element."""
+    try:
+        element_id = request.json()["element_id"]
+        value = request.json()["value"]
+        result = semantic_backend.set_value(element_id, value)
+        return {
+            "success": result.ok,
+            "element_id": element_id,
+            "element_name": result.element_name,
+            "detail": result.detail,
+            "duration_ms": result.duration_ms,
+        }
+    except SemanticBackendUnavailable as exc:
+        raise _actionable_error(
+            "Could not set value on element '{}'. Check that cua-driver is "
+            "installed and the desktop is running."
+            .format(element_id)
+        ) from exc
+    except KeyError as exc:
+        raise _actionable_error(
+            "Invalid request for semantic/set-value: missing 'element_id' or "
+            "'value'."
+        ) from exc
+
+
+@app.get("/semantic/read")
+@limiter.limit("10/minute")
+def semantic_read(request: Request, element_id: str = "", max_depth: int = 6):
+    """Read the text content of an element or its subtree."""
+    try:
+        text = semantic_backend.read_text(element_id, max_depth=max_depth)
+        return {
+            "success": True,
+            "element_id": element_id,
+            "text": text,
+            "max_depth": max_depth,
+        }
+    except SemanticBackendUnavailable as exc:
+        raise _actionable_error(
+            "Could not read element contents for '{}'. Check that cua-driver is "
+            "installed and the desktop is running."
+            .format(element_id)
+        ) from exc
+
+
+@app.get("/semantic/status")
+@limiter.limit("10/minute")
+def semantic_status(request: Request):
+    """Return the semantic backend status (reachability, version, error)."""
+    try:
+        status = semantic_backend.semantic_status()
+        return {
+            "success": True,
+            "enabled": status.enabled,
+            "driver_version": status.driver_version,
+            "reachable": status.reachable,
+            "error": status.error,
+            "element_counts": status.element_counts,
+        }
+    except SemanticBackendUnavailable as exc:
+        raise _actionable_error(
+            "Semantic control is not available. Install cua-driver or start it on "
+            "to install cua-driver or start it on the host, then retry."
+        ) from exc
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):

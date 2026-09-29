@@ -7,6 +7,8 @@ Welcome to the Open-PC documentation. This folder contains detailed technical do
 ```
 docs/
 ├── README.md              # This file - documentation index
+├── cloud/                 # A-Coder Cloud — Sovereign Edition (plan)
+│   └── README.md          # Always-on agent fleet architecture and roadmap
 ├── desktop/               # Desktop Container Documentation
 │   └── README.md          # Agent server, automation layer, VNC setup
 ├── mcp-server/            # MCP Server Documentation
@@ -19,6 +21,7 @@ docs/
 
 | Component | Description | Documentation |
 |-----------|-------------|--------------|
+| **A-Coder Cloud** | Always-on agent fleet built on Open-PC (plan) | [docs/cloud/](cloud/) |
 | **Desktop Container** | Linux desktop with XFCE4, VNC, and automation APIs | [docs/desktop/](desktop/) |
 | **MCP Server** | FastMCP server for AI assistant integration | [docs/mcp-server/](mcp-server/) |
 | **Web Dashboard** | React-based real-time control panel | [docs/dashboard/](dashboard/) |
