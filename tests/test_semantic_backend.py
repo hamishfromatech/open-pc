@@ -5,7 +5,7 @@ conftest, and without a real CuaDriver by exercising the degradation paths.
 """
 import pytest
 
-from docker.semantic_backend import (
+from semantic_backend import (
     CuaDriverUnavailable,
     SemanticBackend,
     ElementDetail,
@@ -47,8 +47,9 @@ def test_semantic_backend_unavailable_raises():
         backend.set_value("any-element", "value")
     with pytest.raises(CuaDriverUnavailable):
         backend.read_text("any-element")
-    with pytest.raises(CuaDriverUnavailable):
-        backend.semantic_status()
+    # semantic_status() is the reporting path — it must NOT raise (see
+    # test_semantic_backend_unavailable_status_is_false).
+    assert backend.semantic_status().reachable is False
 
 
 def test_semantic_backend_unavailable_status_is_false():
@@ -138,7 +139,7 @@ def test_semantic_backend_unavailable_is_false():
 # ---------------------------------------------------------------------------
 
 def test_driver_unavailable_raises_client_error():
-    backend = SemanticBackend()
+    backend = SemanticBackend(driver_url="http://127.0.0.1:1")
     # The client must raise CuaDriverUnavailable, not a raw RuntimeError.
     with pytest.raises(CuaDriverUnavailable):
         backend.driver.click("element-1")

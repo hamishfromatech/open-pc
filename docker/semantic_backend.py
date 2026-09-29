@@ -27,11 +27,10 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable
-
-import pytest
 
 logger = logging.getLogger(__name__)
 
@@ -115,17 +114,6 @@ class ActionResult:
     duration_ms: int = 0
 
 
-@dataclass
-class DriverStatus:
-    """Status of the underlying driver (mirrors cua-driver ``/health``)."""
-
-    enabled: bool = False
-    driver_version: str | None = None
-    reachable: bool = False
-    error: str | None = None
-    element_counts: dict[str, int] = field(default_factory=dict)
-
-
 # ---------------------------------------------------------------------------
 # Driver Client
 # ---------------------------------------------------------------------------
@@ -138,11 +126,32 @@ class CuaDriverClient:
     ``CuaDriverUnavailable`` when the driver is not reachable.
     """
 
-    def __init__(self, driver_url: str = DEFAULT_DRIVER_URL) -> None:
+    def __init__(
+        self,
+        driver_url: str = DEFAULT_DRIVER_URL,
+        driver_timeout: float = DRIVER_TIMEOUT_SECONDS,
+    ) -> None:
         self.driver_url = driver_url
+        self.driver_timeout = driver_timeout
         self._driver: Any = None
         self._status = DriverStatus()
         self._probe_time: float | None = None
+        # Probe once at construction so callers can check reachability without
+        # triggering an action; _ensure_ready() re-probes lazily if it failed.
+        self._probe()
+
+    def _ensure_ready(self) -> None:
+        """Re-probe (bounded) if the driver was unreachable at construction.
+
+        The driver may come up after the server starts, so a failed probe is
+        retried on demand rather than permanently poisoning the client.
+        """
+        if not self._status.reachable:
+            self._probe()
+        if not self._status.reachable:
+            raise CuaDriverUnavailable(
+                self._status.error or "CuaDriver is not available"
+            )
 
     # ------------------------------------------------------------------
     # Probing
@@ -155,23 +164,43 @@ class CuaDriverClient:
         self._status.error = None
         self._status.driver_version = None
         self._status.element_counts = {}
+        if "cua_driver" not in sys.modules:
+            # Skip retry sleeps when the package is simply absent — there is
+            # nothing to wait for (the common case on stock images).
+            retries = 1
+        else:
+            retries = DRIVER_RETRY_TIMES
 
-        for attempt in range(1, DRIVER_RETRY_TIMES + 1):
+        for attempt in range(1, retries + 1):
             try:
-                self._driver = self._load_driver()
-                self._status.driver_version = self._driver.version()
+                driver = self._load_driver()
+                # Liveness check: constructing the driver object is not enough,
+                # the driver service must answer at the configured URL. Any
+                # transport-level failure (ConnectionError, timeout, ...) is
+                # normalized to CuaDriverUnavailable so callers see one error.
+                try:
+                    version = driver.version(driver_url=self.driver_url)
+                except CuaDriverUnavailable:
+                    raise
+                except Exception as exc:
+                    raise CuaDriverUnavailable(
+                        f"CuaDriver not reachable at {self.driver_url}: {exc}"
+                    ) from exc
+                self._status.driver_version = version
+                self._driver = driver
                 self._status.reachable = True
                 self._status.error = None
                 break
             except CuaDriverUnavailable as exc:
+                self._driver = None
                 self._status.error = str(exc)
                 logger.warning(
                     "CuaDriver probe attempt %d/%d failed: %s",
                     attempt,
-                    DRIVER_RETRY_TIMES,
+                    retries,
                     exc,
                 )
-                if attempt < DRIVER_RETRY_TIMES:
+                if attempt < retries:
                     time.sleep(0.5 * attempt)
         self._probe_time = time.time()
 
@@ -181,6 +210,10 @@ class CuaDriverClient:
             import cua_driver  # type: ignore
             from cua_driver import CuaDriver  # type: ignore
 
+            return CuaDriver(driver_url=self.driver_url, timeout=self.driver_timeout)
+        except TypeError:
+            # Older cua-driver builds take no constructor args; the URL is
+            # passed per-call instead (see ``version(driver_url=...)``).
             return CuaDriver()
         except ImportError:
             # No cua_driver package installed — the driver is not available.
@@ -197,8 +230,7 @@ class CuaDriverClient:
 
     def screen_info(self) -> ScreenInfo:
         """Return the current screen geometry and cursor position."""
-        if not self._driver or not self._status.reachable:
-            raise CuaDriverUnavailable("CuaDriver is not available")
+        self._ensure_ready()
         info = self._driver.screen_info()
         return ScreenInfo(
             width=info.width,
@@ -217,24 +249,21 @@ class CuaDriverClient:
         Returns a list of ElementInfo with roles, names, positions, actionable
         verbs, and child element references.
         """
-        if not self._driver or not self._status.reachable:
-            raise CuaDriverUnavailable("CuaDriver is not available")
+        self._ensure_ready()
         tree = self._driver.get_elements(app=app, window=window)
         return self._normalize_tree(tree)
 
     def get_element_detail(self, element_id: str) -> ElementDetail:
         """Return detailed info for a single element."""
-        if not self._driver or not self._status.reachable:
-            raise CuaDriverUnavailable("CuaDriver is not available")
+        self._ensure_ready()
         detail = self._driver.get_element_detail(element_id)
         if detail is None:
-            raise CuaDriverUnavailable(f"Element {element_id} not found")
+            raise ElementNotFoundError(element_id)
         return self._normalize_detail(detail)
 
     def get_element_tree_by_id(self, element_id: str) -> ElementDetail | None:
         """Return a single-element detail, or None if the element is not found."""
-        if not self._driver or not self._status.reachable:
-            raise CuaDriverUnavailable("CuaDriver is not available")
+        self._ensure_ready()
         detail = self._driver.get_element_detail(element_id)
         return self._normalize_detail(detail) if detail else None
 
@@ -244,22 +273,19 @@ class CuaDriverClient:
 
     def click(self, element_id: str) -> ActionResult:
         """Invoke the default action of a UI element via the driver."""
-        if not self._driver or not self._status.reachable:
-            raise CuaDriverUnavailable("CuaDriver is not available")
+        self._ensure_ready()
         result = self._driver.click(element_id)
         return self._normalize_action(result)
 
     def set_value(self, element_id: str, value: str) -> ActionResult:
         """Set a text value on an editable element."""
-        if not self._driver or not self._status.reachable:
-            raise CuaDriverUnavailable("CuaDriver is not available")
+        self._ensure_ready()
         result = self._driver.set_value(element_id, value)
         return self._normalize_action(result)
 
     def read_text(self, element_id: str, max_depth: int = DEFAULT_ELEMENT_TREE_MAX_DEPTH) -> str:
         """Read the text content of an element or its subtree."""
-        if not self._driver or not self._status.reachable:
-            raise CuaDriverUnavailable("CuaDriver is not available")
+        self._ensure_ready()
         text = self._driver.read_text(element_id, max_depth=max_depth)
         return text or ""
 
@@ -331,6 +357,14 @@ class CuaDriverUnavailable(RuntimeError):
     """Raised when the Cua Driver cannot be loaded or is not reachable."""
 
 
+class ElementNotFoundError(KeyError):
+    """Raised when a referenced element id does not exist in the current tree."""
+
+
+#: Alias used by the REST layer — keeps one exception name in error paths.
+SemanticBackendUnavailable = CuaDriverUnavailable
+
+
 class SemanticBackend:
     """Unified semantic desktop control backend.
 
@@ -345,7 +379,9 @@ class SemanticBackend:
         driver_timeout: float = DRIVER_TIMEOUT_SECONDS,
     ) -> None:
         self.driver = CuaDriverClient(driver_url=driver_url, driver_timeout=driver_timeout)
-        self._status = self.driver.status()
+        # Share the client's live status object so SemanticBackend always
+        # reflects the client's latest probe state (never a stale snapshot).
+        self._status = self.driver._status
 
     # ------------------------------------------------------------------
     # Public API
@@ -386,7 +422,13 @@ class SemanticBackend:
         return self.driver.read_text(element_id, max_depth=max_depth)
 
     def semantic_status(self) -> DriverStatus:
-        """Return driver reachability and version state."""
+        """Return driver reachability and version state (never raises).
+
+        Status reporting must not throw: an unreachable driver is a valid
+        status (``reachable=False`` + ``error``), not an exception. Use
+        :meth:`is_available` for a boolean check or any action method to
+        get a raising path.
+        """
         return self._status
 
     # ------------------------------------------------------------------
@@ -405,16 +447,24 @@ class SemanticBackend:
 
 
 # ---------------------------------------------------------------------------
-# Test fixtures (mirror existing test conventions)
+# Module-level singleton accessor
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
-def semantic_backend():
-    """A SemanticBackend with a fresh driver client (no real display needed)."""
-    return SemanticBackend()
+_semantic_backend: SemanticBackend | None = None
 
 
-@pytest.fixture
-def unavailable_semantic_backend():
-    """A SemanticBackend whose driver is not reachable (for degradation tests)."""
-    return SemanticBackend(driver_url="http://127.0.0.1:1")
+def get_semantic_backend() -> SemanticBackend:
+    """Return the process-wide semantic backend (created lazily).
+
+    Env-gated: the backend only activates when ``OPENPC_ENABLE_CUA_DRIVER`` is
+    true, so default image behavior is unchanged.
+    """
+    global _semantic_backend
+    if _semantic_backend is None:
+        driver_url = os.environ.get("OPENPC_CUA_DRIVER_URL", DEFAULT_DRIVER_URL)
+        enabled = os.environ.get("OPENPC_ENABLE_CUA_DRIVER", "").lower() in (
+            "1", "true", "yes"
+        )
+        _semantic_backend = SemanticBackend(driver_url=driver_url)
+        _semantic_backend._status.enabled = enabled
+    return _semantic_backend

@@ -28,12 +28,11 @@ from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from starlette.middleware.base import BaseHTTPMiddleware
-from docker.semantic_backend import (  # noqa: E402
-    SemanticBackend,  # type: ignore
+from semantic_backend import (  # noqa: E402  (docker dir is on sys.path in-container)
+    ElementNotFoundError,  # type: ignore
     SemanticBackendUnavailable,  # type: ignore
-    ScreenInfo,  # type: ignore
+    get_semantic_backend,  # type: ignore
 )
-from docker.semantic_backend import DEFAULT_DRIVER_URL  # type: ignore
 
 # ============== Rate Limiting ==============
 limiter = Limiter(key_func=get_remote_address)
@@ -63,6 +62,11 @@ APP_VERSION = os.environ.get('APP_VERSION', '0.1.0')
 
 # Global desktop backend (a DesktopBackend adapter; DesktopManager by default)
 desktop_manager: DesktopBackend | None = None
+
+# Semantic (accessibility-tree) control backend. Env-gated — see
+# semantic_backend.get_semantic_backend(); created lazily on first use so a
+# missing/absent driver never blocks server startup.
+semantic_backend = get_semantic_backend()
 
 
 # REST API token authentication
@@ -110,6 +114,15 @@ class MouseScrollRequest(BaseModel):
     direction: str = Field("down", pattern=r"^(up|down)$")
     x: int | None = Field(None, ge=0, description="X coordinate (>= 0)")
     y: int | None = Field(None, ge=0, description="Y coordinate (>= 0)")
+
+
+class SemanticActionRequest(BaseModel):
+    element_id: str = Field(min_length=1, description="Element id from /semantic/tree")
+
+
+class SemanticSetValueRequest(BaseModel):
+    element_id: str = Field(min_length=1, description="Element id from /semantic/tree")
+    value: str = Field(description="Text value to set on the element")
 
 
 class MouseDragRequest(BaseModel):
@@ -323,6 +336,9 @@ def health():
             "cursor": f"{screen_info.cursor_x},{screen_info.cursor_y}"
         }
     except Exception as e:
+        # desktop_manager is None until the lifespan initializes it (e.g. when
+        # the app is exercised without a display, as in tests). Report degraded
+        # rather than crashing the health probe.
         return JSONResponse(
             status_code=503,
             content={"status": "unhealthy", "error": str(e)}
@@ -354,13 +370,9 @@ def capabilities():
         "transports": ["rest", "websocket", "mjpeg-stream"],
         "ws_commands": WS_COMMANDS,
         "semantic": {
-            "enabled": getattr(semantic_backend, "is_available", False),
-            "driver_version": (getattr(semantic_backend.driver, "status", {}) or {}).get(
-                "driver_version"
-            ),
-            "error": (getattr(semantic_backend, "semantic_status", {}) or {}).get(
-                "error"
-            ),
+            "enabled": semantic_backend.is_available(),
+            "driver_version": semantic_backend.semantic_status().driver_version,
+            "error": semantic_backend.semantic_status().error,
         },
         "rest_endpoints": [
             "/screenshot", "/screenshot/base64", "/screenshot/region",
@@ -760,37 +772,12 @@ def semantic_tree(request: Request, app: str = "", window: str = ""):
             "app": app,
             "window": window,
             "count": len(tree),
-            "elements": tree,
+            "elements": [vars(e) for e in tree],
         }
-    except SemanticBackendUnavailable as exc:
+    except SemanticBackendUnavailable:
         raise _actionable_error(
-            "Semantic control is not available. Install cua-driver or start it on "
-            "to install cua-driver or start it on the host, then retry."
-        )
-
-
-@app.get("/semantic/tree")
-@limiter.limit("30/minute")
-def semantic_tree(request: Request, app: str = "", window: str = ""):
-    """Get a flattened accessibility-tree element tree for an app/window.
-
-    Returns elements with roles, names, positions, actionable verbs, and
-    child element references. Preferred over screenshots when finding UI
-    elements by name or role.
-    """
-    try:
-        tree = semantic_backend.get_element_tree(app=app, window=window)
-        return {
-            "success": True,
-            "app": app,
-            "window": window,
-            "count": len(tree),
-            "elements": tree,
-        }
-    except SemanticBackendUnavailable as exc:
-        raise _actionable_error(
-            "Semantic control is not available. Install cua-driver or start it on "
-            "to install cua-driver or start it on the host, then retry."
+            "Semantic control is not available. Install cua-driver (pip install "
+            "cua-driver) or start the driver service on the host, then retry."
         )
 
 
@@ -802,7 +789,7 @@ def semantic_element(request: Request, element_id: str):
         detail = semantic_backend.get_element_detail(element_id)
         return {
             "success": True,
-            "element_id": element_id,
+            "element_id": detail.element_id,
             "app": detail.app,
             "role": detail.role,
             "name": detail.name,
@@ -811,6 +798,12 @@ def semantic_element(request: Request, element_id: str):
             "children_count": detail.children_count,
             "description": detail.description,
         }
+    except ElementNotFoundError:
+        raise _actionable_error(
+            "Element '{}' not found. Refresh the tree with GET /semantic/tree "
+            "and retry with a valid element id.".format(element_id),
+            status=404,
+        )
     except SemanticBackendUnavailable as exc:
         raise _actionable_error(
             "Could not retrieve element details for '{}'. Check that cua-driver is "
@@ -821,14 +814,14 @@ def semantic_element(request: Request, element_id: str):
 
 @app.post("/semantic/click")
 @limiter.limit("10/minute")
-def semantic_click(request: Request):
+def semantic_click(request: Request, body: SemanticActionRequest):
     """Invoke the default action of a UI element via the driver."""
     try:
-        element_id = request.json()["element_id"]
+        element_id = body.element_id
         result = semantic_backend.click(element_id)
         return {
             "success": result.ok,
-            "element_id": element_id,
+            "element_id": result.element_id or element_id,
             "element_name": result.element_name,
             "detail": result.detail,
             "duration_ms": result.duration_ms,
@@ -839,23 +832,19 @@ def semantic_click(request: Request):
             "installed and the desktop is running."
             .format(element_id)
         ) from exc
-    except KeyError as exc:
-        raise _actionable_error(
-            "Invalid request for semantic/click: missing 'element_id'."
-        ) from exc
 
 
 @app.post("/semantic/set-value")
 @limiter.limit("10/minute")
-def semantic_set_value(request: Request):
+def semantic_set_value(request: Request, body: SemanticSetValueRequest):
     """Set a text value on an editable element."""
     try:
-        element_id = request.json()["element_id"]
-        value = request.json()["value"]
+        element_id = body.element_id
+        value = body.value
         result = semantic_backend.set_value(element_id, value)
         return {
             "success": result.ok,
-            "element_id": element_id,
+            "element_id": result.element_id or element_id,
             "element_name": result.element_name,
             "detail": result.detail,
             "duration_ms": result.duration_ms,
@@ -865,11 +854,6 @@ def semantic_set_value(request: Request):
             "Could not set value on element '{}'. Check that cua-driver is "
             "installed and the desktop is running."
             .format(element_id)
-        ) from exc
-    except KeyError as exc:
-        raise _actionable_error(
-            "Invalid request for semantic/set-value: missing 'element_id' or "
-            "'value'."
         ) from exc
 
 
