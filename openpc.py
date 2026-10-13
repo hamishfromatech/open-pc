@@ -12,18 +12,33 @@ Usage:
     ./openpc.py <command>            # after: chmod +x openpc.py
 
 Commands:
-    start [--build]    Start all Open-PC containers
-    stop               Stop and remove containers
-    restart            Restart containers
-    status             Show running containers (alias: ps, list)
-    logs [service]     Tail logs (service: desktop|dashboard|mcp; add -f to follow)
-    shell              Open a shell in the desktop container
-    exec -- <cmd...>   Run a command in the desktop container
-    screenshot [path]  Save a desktop screenshot (default: screen.png)
-    open-url <url>     Open a URL in the sandbox browser
-    run -- <cmd...>    Run a shell command in the sandbox (via REST /apps/run)
-    desktop            Print the noVNC web URL
-    doctor             Diagnose docker, compose, and the REST API
+    Docker mode (default):
+        start [--build]    Start all Open-PC containers
+        stop               Stop and remove containers
+        restart            Restart containers
+        status             Show running containers (alias: ps, list)
+        logs [service]     Tail logs (service: desktop|dashboard|mcp; add -f to follow)
+        shell              Open a shell in the desktop container
+        exec -- <cmd...>   Run a command in the desktop container
+        screenshot [path]  Save a desktop screenshot (default: screen.png)
+        open-url <url>     Open a URL in the sandbox browser
+        run -- <cmd...>    Run a shell command in the sandbox (via REST /apps/run)
+        desktop            Print the noVNC web URL
+        doctor             Diagnose docker, compose, and the REST API
+
+    Bare-metal mode:
+        start --mode bare-metal [--backend cua-driver|native]
+                           Start Open-PC on the host OS (no Docker)
+        stop               Stop bare-metal server too
+        status             Shows whichever is running
+
+    Guardrails:
+        configure --permission bounded|standard|unrestricted
+        configure --whitelist strict|moderate|permissive
+        guard status       Show active guardrails config
+        guard audit [-n N] Print last N actions from log
+        guard reset        Clear audit log
+
     version            Print the CLI version
 """
 from __future__ import annotations
@@ -46,6 +61,7 @@ DESKTOP_SERVICE = "open-pc-desktop"
 DASHBOARD_SERVICE = "open-pc-dashboard"
 MCP_SERVICE = "open-pc-mcp"
 NOVNC_PORT = 6080
+BARE_METAL_PORT = 8093
 
 ALL_SERVICES = (DESKTOP_SERVICE, DASHBOARD_SERVICE, MCP_SERVICE)
 SERVICE_ALIASES = {
@@ -84,6 +100,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("start", help="Start all Open-PC containers")
     p.add_argument("--build", action="store_true", help="Rebuild images before starting")
+    p.add_argument("--mode", choices=["docker", "bare-metal"], default="docker",
+                   help="Run mode: docker (default) or bare-metal on host OS")
+    p.add_argument("--backend", choices=["cua-driver", "native"], default="cua-driver",
+                   help="Backend for bare-metal mode (requires cua-driver installed)")
 
     sub.add_parser("stop", help="Stop and remove containers")
     sub.add_parser("restart", help="Restart containers")
@@ -103,20 +123,44 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("screenshot", help="Save a desktop screenshot")
     p.add_argument("path", nargs="?", default="screen.png", help="Output file path")
-    p.add_argument("--port", type=int, default=DEFAULT_REST_PORT, help="Host REST port")
+    p.add_argument("--port", type=int, default=None, help="Host REST port (default: auto-detect 8093 then 8090)")
 
     p = sub.add_parser("open-url", help="Open a URL in the sandbox browser")
     p.add_argument("url", help="URL to open")
-    p.add_argument("--port", type=int, default=DEFAULT_REST_PORT, help="Host REST port")
+    p.add_argument("--port", type=int, default=None, help="Host REST port (default: auto-detect 8093 then 8090)")
 
     p = sub.add_parser("run", help="Run a shell command in the sandbox via REST")
     p.add_argument("cmd", nargs=argparse.REMAINDER, help="Command (after --) to run")
-    p.add_argument("--port", type=int, default=DEFAULT_REST_PORT, help="Host REST port")
+    p.add_argument("--port", type=int, default=None, help="Host REST port (default: auto-detect 8093 then 8090)")
     p.add_argument("--timeout", type=int, default=30, help="Command timeout (seconds)")
 
     sub.add_parser("desktop", help="Print the noVNC web URL")
     sub.add_parser("doctor", help="Diagnose docker, compose, and the REST API")
+
+    # ── Configure (guardrails settings) ──────────────────────────────
+    p = sub.add_parser("configure", help="Configure guardrails settings")
+    p.add_argument("--permission", choices=["bounded", "standard", "unrestricted"],
+                   help="Permission mode for agent actions")
+    p.add_argument("--whitelist", choices=["strict", "moderate", "permissive"],
+                   help="Command whitelist granularity")
+    p.add_argument("--max-actions", type=int, help="Max actions per minute")
+    p.add_argument("--timeout", type=int, help="Command timeout in seconds")
+    p.add_argument("--workspace", help="Restrict commands to this directory")
+
+    # ── Guard (guardrails status/audit) ──────────────────────────────
+    p = sub.add_parser("guard", help="Manage guardrails")
+    p.add_argument("action", choices=["status", "audit", "reset"], nargs="?",
+                   default="status", help="Action to perform")
+    p.add_argument("-n", type=int, default=50, help="Number of audit entries to show")
     return parser
+
+
+def _ensure_openpc_core_importable() -> None:
+    """Make `import openpc_core` work without a pip install (adds openpc-core/ to path)."""
+    import sys
+    core_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "openpc-core")
+    if core_src not in sys.path:
+        sys.path.insert(0, core_src)
 
 
 # --------------------------------------------------------------------------- #
@@ -158,6 +202,27 @@ def rest_get(url: str, timeout: int = 15) -> bytes:
     req = urllib.request.Request(url, headers=_rest_headers(), method="GET")
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
+
+
+def _resolve_rest_port(explicit: int | None) -> int:
+    """Return the port of a healthy agent server.
+
+    Explicit ``--port`` wins; otherwise probe bare-metal (8093) first, then
+    the Docker-mapped REST port (8090).
+    """
+    if explicit:
+        return explicit
+    for port in (BARE_METAL_PORT, DEFAULT_REST_PORT):
+        try:
+            body = rest_get(rest_url(port, "/health"), timeout=3)
+            if json.loads(body).get("status") == "healthy":
+                return port
+        except Exception:  # noqa: BLE001
+            continue
+    raise SystemExit(
+        f"No Open-PC agent responding on port {BARE_METAL_PORT} or {DEFAULT_REST_PORT}. "
+        "Start one first (openpc.py start)."
+    )
 
 
 def rest_post_json(url: str, body: dict, timeout: int = 15) -> dict:
@@ -230,7 +295,8 @@ def cmd_exec(args) -> int:
 
 
 def cmd_screenshot(args) -> int:
-    url = rest_url(args.port, "/screenshot")
+    port = _resolve_rest_port(args.port)
+    url = rest_url(port, "/screenshot")
     png = rest_get(url, timeout=30)
     with open(args.path, "wb") as f:
         f.write(png)
@@ -239,7 +305,8 @@ def cmd_screenshot(args) -> int:
 
 
 def cmd_open_url(args) -> int:
-    url = rest_url(args.port, "/apps/open-url")
+    port = _resolve_rest_port(args.port)
+    url = rest_url(port, "/apps/open-url")
     result = rest_post_json(url, {"url": args.url}, timeout=15)
     if not result.get("success"):
         raise SystemExit(f"Failed to open URL: {result.get('error', 'unknown error')}")
@@ -251,7 +318,8 @@ def cmd_run(args) -> int:
     cmd = [c for c in args.cmd if c != "--"]
     if not cmd:
         raise SystemExit("No command given. Usage: openpc run -- <command...>")
-    url = rest_url(args.port, "/apps/run")
+    port = _resolve_rest_port(args.port)
+    url = rest_url(port, "/apps/run")
     result = rest_post_json(url, {"command": " ".join(cmd), "timeout": args.timeout}, timeout=args.timeout + 10)
     if result.get("stdout"):
         sys.stdout.write(result["stdout"])
@@ -263,6 +331,90 @@ def cmd_run(args) -> int:
 def cmd_desktop(args) -> int:
     print(f"noVNC web URL: http://localhost:{NOVNC_PORT}")
     print("Dashboard:     http://localhost:8092")
+    return 0
+
+
+# ── Bare-metal commands ─────────────────────────────────────────────
+
+def cmd_start_baremetal(args) -> int:
+    """Start Open-PC in bare-metal mode on the host OS."""
+    if sys.version_info < (3, 10):
+        raise SystemExit(
+            f"Bare-metal mode needs Python 3.10+ (this interpreter is {sys.version_info[0]}.{sys.version_info[1]}). "
+            "Use a newer python3 to run openpc.py (e.g. Homebrew's python3.11)."
+        )
+    print("Starting Open-PC in bare-metal mode...")
+    print(f"  Backend: {args.backend}")
+    print(f"  Port:    {BARE_METAL_PORT}")
+    print()
+
+    # Build environment for the subprocess
+    env = os.environ.copy()
+    env["OPENPC_MODE"] = "bare-metal"
+    env["AGENT_HOST"] = "0.0.0.0"
+    env["AGENT_PORT"] = str(BARE_METAL_PORT)
+    env["VNC_PASSWORD"] = os.environ.get("VNC_PASSWORD", "openpc")
+    env["OPENPC_BACKEND"] = args.backend
+
+    # Make openpc_core importable without a pip install
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    core_src = os.path.join(script_dir, "openpc-core")
+    existing_pp = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = ":".join(p for p in (core_src, script_dir, existing_pp) if p)
+
+    agent_script = os.path.join(script_dir, "docker", "agent_server.py")
+
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, agent_script],
+            env=env,
+            cwd=os.path.join(script_dir, "docker"),
+        )
+        print(f"Agent server started (PID {proc.pid}) on port {BARE_METAL_PORT}")
+        print(f"REST API:      http://localhost:{BARE_METAL_PORT}")
+        print()
+        print("Press Ctrl+C to stop.")
+
+        # Keep running until interrupted
+        proc.wait()
+        return 0
+    except FileNotFoundError:
+        raise SystemExit(f"Agent server not found at {agent_script}")
+    except KeyboardInterrupt:
+        print("\nStopping...")
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        return 0
+
+
+def cmd_start(args) -> int:
+    """Start Open-PC — Docker or bare-metal."""
+    if args.mode == "bare-metal":
+        return cmd_start_baremetal(args)
+
+    # Docker mode (existing behavior)
+    extra = ["--build"] if args.build else []
+    run_compose("up", "-d", *extra)
+    print("Open-PC starting. Dashboard: http://localhost:8092  noVNC: http://localhost:6080")
+    return 0
+
+
+def cmd_stop(args) -> int:
+    """Stop Open-PC — Docker or bare-metal."""
+    # Stop Docker containers
+    run_compose("down")
+    print("Docker containers stopped.")
+
+    # Check whether a bare-metal server is still running
+    try:
+        rest_get(rest_url(BARE_METAL_PORT, "/health"), timeout=3)
+        print(f"Bare-metal agent still running on port {BARE_METAL_PORT} — stop it with Ctrl+C in its terminal.")
+    except Exception:
+        pass  # nothing on the bare-metal port
+
     return 0
 
 
@@ -292,7 +444,98 @@ def cmd_doctor(args) -> int:
     return 1 if failures else 0
 
 
+# ── Guardrails commands ─────────────────────────────────────────────
+
+def cmd_configure(args) -> int:
+    """Configure guardrails settings."""
+    try:
+        _ensure_openpc_core_importable()
+        from openpc_core.guardrails.engine import GuardrailsEngine
+    except ImportError:
+        raise SystemExit(
+            "Guardrails not available. Install openpc-core: "
+            "cd openpc-core && pip install -e ."
+        )
+
+    config = GuardrailsEngine.configure(
+        permission=args.permission,
+        whitelist_mode=args.whitelist,
+        max_actions_per_minute=args.max_actions,
+        command_timeout=args.timeout,
+        workspace_dir=args.workspace,
+    )
+    print("Guardrails configured:")
+    for key, value in config.model_dump().items():
+        print(f"  {key}: {value}")
+    return 0
+
+
+def _guard_port() -> int:
+    """Find which port serves /guard/status (bare-metal 8093 first, then docker).
+
+    Returns the port and whether guard endpoints exist. Raises SystemExit
+    with a clear message when no agent is reachable at all.
+    """
+    for port in (BARE_METAL_PORT, DEFAULT_REST_PORT):
+        try:
+            body = rest_get(rest_url(port, "/health"), timeout=3)
+            if not json.loads(body).get("status") == "healthy":
+                continue
+        except Exception:  # noqa: BLE001
+            continue
+        # Agent is up on this port — does it expose guard endpoints?
+        try:
+            body = rest_get(rest_url(port, "/guard/status"), timeout=3)
+            return port
+        except Exception:  # noqa: BLE001
+            raise SystemExit(
+                f"Agent is running on port {port} but has no guardrails endpoints. "
+                "Guardrails only run in bare-metal mode with openpc-core installed."
+            )
+    raise SystemExit(
+        f"No Open-PC agent responding on port {BARE_METAL_PORT} or {DEFAULT_REST_PORT}. "
+        "Start one first (openpc.py start)."
+    )
+
+
+def cmd_guard(args) -> int:
+    """Manage guardrails: status, audit log, reset."""
+    action = args.action or "status"
+    port = _guard_port()
+
+    if action == "status":
+        data = json.loads(rest_get(rest_url(port, "/guard/status"), timeout=5))
+        if not data.get("enabled"):
+            print("Guardrails: not enabled (Docker mode or openpc-core not installed)")
+            return 0
+        print("Guardrails status:")
+        print(f"  Mode:          {data['mode']}")
+        for key, value in data["config"].items():
+            print(f"  {key}: {value}")
+        print(f"  Log entries:   {data['log_entries']}")
+        print(f"  Rate limit:    {data['rate_limit_per_minute']} actions/min")
+
+    elif action == "audit":
+        entries = json.loads(rest_get(rest_url(port, f"/guard/audit?limit={args.n}"), timeout=5))
+        if isinstance(entries, dict) or not entries:
+            print("No audit entries.")
+            return 0
+        print(f"Last {min(args.n, len(entries))} audit entries:")
+        for entry in entries:
+            status = "BLOCKED" if entry.get("blocked") else "OK"
+            print(f"  [{entry['timestamp']}] {status}: {entry['action']} ({entry.get('target', '')})")
+            if entry.get("reason"):
+                print(f"           Reason: {entry['reason']}")
+
+    elif action == "reset":
+        rest_post_json(rest_url(port, "/guard/reset"), {}, timeout=5)
+        print("Audit log cleared.")
+
+    return 0
+
+
 COMMANDS = {
+    # Docker commands
     "start": cmd_start,
     "stop": cmd_stop,
     "restart": cmd_restart,
@@ -307,6 +550,9 @@ COMMANDS = {
     "run": cmd_run,
     "desktop": cmd_desktop,
     "doctor": cmd_doctor,
+    # Guardrails commands
+    "configure": cmd_configure,
+    "guard": cmd_guard,
 }
 
 

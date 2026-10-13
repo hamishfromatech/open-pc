@@ -20,11 +20,20 @@ from starlette.middleware import Middleware
 
 # ============== Configuration ==============
 
+# Support both Docker and bare-metal modes
 OPENPC_HOST = os.environ.get('OPENPC_HOST', 'localhost')
 OPENPC_PORT = int(os.environ.get('OPENPC_PORT', '8080'))
 OPENPC_PASSWORD = os.environ.get('OPENPC_PASSWORD', 'openpc')
 
-BASE_URL = f"http://{OPENPC_HOST}:{OPENPC_PORT}"
+# Bare-metal mode overrides (set OPENPC_MODE=bare-metal to use)
+BARE_METAL_HOST = os.environ.get('OPENPC_BARE_METAL_HOST', '127.0.0.1')
+BARE_METAL_PORT = int(os.environ.get('OPENPC_BARE_METAL_PORT', '8093'))
+
+# Detect mode from environment
+if os.environ.get('OPENPC_MODE', 'docker') == 'bare-metal':
+    BASE_URL = f"http://{BARE_METAL_HOST}:{BARE_METAL_PORT}"
+else:
+    BASE_URL = f"http://{OPENPC_HOST}:{OPENPC_PORT}"
 
 # ============== Desktop Client ==============
 

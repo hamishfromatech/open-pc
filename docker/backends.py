@@ -13,7 +13,8 @@ probes the environment and returns a concrete adapter, raising a clear,
 actionable error when the requested backend is unavailable.
 
 Select a backend with ``OPENPC_BACKEND`` (``local`` default; ``remote`` is the
-future QEMU/KVM path, not wired up yet).
+future QEMU/KVM path, not wired up yet). For bare-metal mode, set
+``OPENPC_MODE=bare-metal`` and optionally ``OPENPC_BACKEND=cua-driver``.
 """
 from __future__ import annotations
 
@@ -23,6 +24,7 @@ from typing import Any, Protocol, runtime_checkable
 
 LOCAL_BACKEND = "local"
 REMOTE_BACKEND = "remote"
+BARE_METAL_BACKEND = "bare-metal"
 
 
 @runtime_checkable
@@ -86,19 +88,45 @@ def probe_local() -> BackendStatus:
         return BackendStatus(LOCAL_BACKEND, available=False, detail=str(e))
 
 
-def probe_backends() -> list[BackendStatus]:
+def probe_bare_metal() -> BackendStatus:
+    """Probe whether a bare-metal backend (CUA Driver / pyautogui) is usable."""
+    try:
+        from openpc_core.backends.cua_driver import CUADriverBackend
+        perm_mode = os.environ.get("OPENPC_PERMISSION", "bounded")
+        prefer_native = os.environ.get("OPENPC_BACKEND", "cua-driver") == "native"
+        CUADriverBackend(mode=perm_mode, prefer_native=prefer_native)
+        return BackendStatus(BARE_METAL_BACKEND, available=True, detail="CUA Driver / pyautogui")
+    except Exception as e:  # noqa: BLE001
+        return BackendStatus(BARE_METAL_BACKEND, available=False, detail=str(e))
+
+
+def probe_backends(mode: str = "docker") -> list[BackendStatus]:
     """Probe every known backend, in preference order."""
+    if mode == "bare-metal":
+        return [probe_bare_metal()]
     return [probe_local(), BackendStatus(REMOTE_BACKEND, available=False, detail="not implemented yet")]
 
 
-def resolve_backend(backend: str | None = None) -> DesktopBackend:
+def resolve_backend(backend: str | None = None, mode: str = "docker") -> DesktopBackend:
     """Return a concrete ``DesktopBackend``.
 
-    Selection order: explicit ``backend`` arg > ``OPENPC_BACKEND`` env > ``local``.
+    Selection order: explicit ``backend`` arg > ``OPENPC_BACKEND`` env > default.
+    Default is ``local`` for Docker mode, ``bare-metal`` when OPENPC_MODE=bare-metal.
     Mirrors SmolVM's ``resolve_backend`` — raise a clear error rather than
     silently downgrading when the requested backend is unavailable.
     """
     chosen = backend or os.environ.get("OPENPC_BACKEND", LOCAL_BACKEND)
+
+    if mode == "bare-metal":
+        from openpc_core.backends.cua_driver import CUADriverBackend, CUABackendUnavailable
+        try:
+            perm_mode = os.environ.get("OPENPC_PERMISSION", "bounded")
+            prefer_native = chosen == "native" or os.environ.get("OPENPC_BACKEND") == "native"
+            driver = CUADriverBackend(mode=perm_mode, prefer_native=prefer_native)
+            driver.backend = BARE_METAL_BACKEND  # tag for introspection / /health
+            return driver
+        except CUABackendUnavailable as e:
+            raise SystemExit(str(e))
 
     if chosen == LOCAL_BACKEND:
         from desktop_manager import DesktopManager  # local adapter (in-process)
@@ -114,7 +142,7 @@ def resolve_backend(backend: str | None = None) -> DesktopBackend:
         )
 
     raise SystemExit(
-        f"Unknown backend '{chosen}'. Set OPENPC_BACKEND to one of: {LOCAL_BACKEND}, {REMOTE_BACKEND}."
+        f"Unknown backend '{chosen}'. Set OPENPC_BACKEND to one of: {LOCAL_BACKEND}, {REMOTE_BACKEND}, or set OPENPC_MODE=bare-metal."
     )
 
 

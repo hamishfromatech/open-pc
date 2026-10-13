@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openpc-core"
+version = "0.2.0"
+description = "Open-PC core: cross-platform desktop backend abstraction and guardrails engine"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "aiohttp>=3.9",
+    "slowapi>=0.1",
+]
+
+[project.optional-dependencies]
+cua-driver = ["cua-driver>=0.27"]
+
+[tool.setuptools.packages.find]
+include = ["openpc_core*"]

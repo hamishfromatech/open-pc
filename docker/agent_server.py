@@ -20,6 +20,16 @@ from typing import Any
 import uvicorn
 from backends import DesktopBackend, resolve_backend
 from desktop_manager import MouseButton
+
+# ── Guardrails (bare-metal mode) ───────────────────────────────────
+try:
+    from openpc_core.guardrails.engine import GuardrailsEngine, load_guardrails_config
+    _GUARD_ENABLED = True
+except ImportError:
+    _GUARD_ENABLED = False
+
+# Detect operating mode: docker or bare-metal
+OPERATING_MODE = os.environ.get("OPENPC_MODE", "docker")
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -233,28 +243,44 @@ connection_manager = ConnectionManager()
 async def lifespan(app: FastAPI):
     """Initialize the desktop backend on startup."""
     global desktop_manager
-    logger.info("Initializing Open-PC Agent Server...")
+    logger.info("Initializing Open-PC Agent Server (mode=%s)...", OPERATING_MODE)
 
     # Wait for the X11 display to be ready before resolving the backend. We
     # re-resolve on each attempt so the probe can succeed once the display is up.
     max_attempts = 30
     for attempt in range(max_attempts):
         try:
-            desktop_manager = resolve_backend()
+            desktop_manager = resolve_backend(mode=OPERATING_MODE)
             screen_info = desktop_manager.get_screen_info()
-            logger.info(f"Display ready. Screen: {screen_info.width}x{screen_info.height}")
+            width = screen_info["width"] if isinstance(screen_info, dict) else screen_info.width
+            height = screen_info["height"] if isinstance(screen_info, dict) else screen_info.height
+            logger.info(f"Display ready. Screen: {width}x{height}")
             break
         except Exception:
             logger.warning(f"Waiting for display... ({attempt + 1}/{max_attempts})")
             await asyncio.sleep(1)
     else:
         logger.error("Failed to initialize display after 30 seconds")
-        desktop_manager = resolve_backend()  # Try anyway
+        desktop_manager = resolve_backend(mode=OPERATING_MODE)  # Try anyway
 
     logger.info(f"Open-PC Agent Server ready on {AGENT_HOST}:{AGENT_PORT}")
+
+    # Initialize guardrails engine (bare-metal mode)
+    global guard_engine
+    if _GUARD_ENABLED and OPERATING_MODE == "bare-metal":
+        from openpc_core.guardrails.engine import get_shared_engine
+        guard_engine = get_shared_engine()
+        logger.info("Guardrails engine initialized (mode=%s, permission=%s)",
+                     OPERATING_MODE, guard_engine.config.permission)
+
     yield
 
     # Cleanup
+    if _GUARD_ENABLED and guard_engine:
+        try:
+            guard_engine.save_audit_log()
+        except Exception:
+            pass
     logger.info("Shutting down Open-PC Agent Server")
 
 
@@ -329,11 +355,17 @@ def health():
     """Health check endpoint"""
     try:
         screen_info = desktop_manager.get_screen_info()
+        # Docker backend returns a ScreenInfo dataclass; bare-metal backends
+        # return a plain dict — normalise before formatting.
+        width = screen_info["width"] if isinstance(screen_info, dict) else screen_info.width
+        height = screen_info["height"] if isinstance(screen_info, dict) else screen_info.height
+        cursor_x = screen_info.get("cursor_x", 0) if isinstance(screen_info, dict) else getattr(screen_info, "cursor_x", 0)
+        cursor_y = screen_info.get("cursor_y", 0) if isinstance(screen_info, dict) else getattr(screen_info, "cursor_y", 0)
         return {
             "status": "healthy",
             "backend": getattr(desktop_manager, "backend", "local"),
-            "display": f"{screen_info.width}x{screen_info.height}",
-            "cursor": f"{screen_info.cursor_x},{screen_info.cursor_y}"
+            "display": f"{width}x{height}",
+            "cursor": f"{cursor_x},{cursor_y}"
         }
     except Exception as e:
         # desktop_manager is None until the lifespan initializes it (e.g. when
@@ -398,6 +430,65 @@ def capabilities():
             },
         },
     }
+
+
+# ============== Guardrails Middleware & Endpoints ==============
+
+if _GUARD_ENABLED:
+    guard_engine: GuardrailsEngine | None = None
+
+    @app.middleware("http")
+    async def guardrails_middleware(request: Request, call_next):
+        """Check permission + rate limit before every write action."""
+        if not guard_engine or OPERATING_MODE != "bare-metal":
+            return await call_next(request)
+
+        # Only gate POST/PUT actions; read endpoints are fast-tracked
+        if request.method in ("POST", "PUT") and not request.url.path.startswith("/guard"):
+            if not guard_engine.rate_limit_check():
+                return JSONResponse(
+                    status_code=429,
+                    content={"error": "Rate limit exceeded. Slow down your actions."}
+                )
+            # Log action for audit
+            guard_engine.audit_log_action(
+                action=request.url.path,
+                target=f"{request.method} {request.url.path}",
+                result="pending",
+            )
+        return await call_next(request)
+
+    @app.get("/guard/status")
+    async def guard_status():
+        """Return current guardrails configuration and audit log summary."""
+        if not _GUARD_ENABLED:
+            return {"enabled": False, "mode": OPERATING_MODE}
+        config = load_guardrails_config()
+        live = guard_engine is not None
+        engine = guard_engine or GuardrailsEngine(config)
+        return {
+            "enabled": True,
+            "live": live,
+            "mode": OPERATING_MODE,
+            "config": config.model_dump(),
+            "log_entries": len(engine._audit_log),
+            "rate_limit_per_minute": engine.rate_limiter.max_per_minute,
+        }
+
+    @app.get("/guard/audit")
+    async def guard_audit(limit: int = 50):
+        """Return the last N audit log entries."""
+        if not _GUARD_ENABLED or guard_engine is None:
+            return {"enabled": False}
+        return guard_engine.get_audit_log(limit=limit)
+
+    @app.post("/guard/reset")
+    async def guard_reset():
+        """Clear the in-memory audit log."""
+        if not _GUARD_ENABLED or guard_engine is None:
+            return {"enabled": False}
+        guard_engine.clear_audit_log()
+        return {"cleared": True}
 
 
 # Helper to run blocking methods without freezing the event loop
@@ -554,6 +645,15 @@ def get_screen_info():
     """Get screen dimensions and cursor position"""
     try:
         info = desktop_manager.get_screen_info()
+        # Docker backend returns a ScreenInfo dataclass; bare-metal backends
+        # return a plain dict — normalise before serialising.
+        if isinstance(info, dict):
+            return {
+                "width": info.get("width"),
+                "height": info.get("height"),
+                "cursor_x": info.get("cursor_x"),
+                "cursor_y": info.get("cursor_y"),
+            }
         return {
             "width": info.width,
             "height": info.height,

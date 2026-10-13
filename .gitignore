@@ -18,4 +18,15 @@ node_modules/
 dist/
 .next/
 .screenshots
-*.log.DS_Store
+*.log
+
+# OS junk
+.DS_Store
+
+# Python build artifacts
+*.egg-info/
+build/
+
+# A-Coder session state
+.a-coder-cli/
+
